@@ -1,0 +1,7 @@
+{
+  "name": "Academic Central",
+  "description": "College Academic Management Portal for centralized assignments, marks, internal assessments, lab manuals, and academic records across Students, Teachers, and Administrators.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
