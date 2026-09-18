@@ -25,29 +25,25 @@ export const StudentLabManuals: React.FC<StudentLabManualsProps> = ({ onOpenPdf 
   // Filter lab manuals and materials
   const manuals = labMaterials.filter((m) => m.type === 'Lab Manual' || m.type === 'Notes');
 
-  const filtered = manuals.filter(
-    (m) =>
-      m.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      m.subjectName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      m.description.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filtered = manuals.filter((m) => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!q) return true;
+    return (
+      (m.title || '').toLowerCase().includes(q) ||
+      (m.subjectName || (m as any).subject_name || '').toLowerCase().includes(q) ||
+      (m.description || '').toLowerCase().includes(q)
+    );
+  });
 
   const handleDownload = (manual: LabMaterial) => {
     setDownloadSuccessId(manual.id);
-    const element = document.createElement('a');
-    const file = new Blob(
-      [
-        `ACADEMIC CENTRAL COLLEGE OF ENGINEERING\nDEPARTMENT OF COMPUTER SCIENCE\n\n${manual.title}\nSubject: ${manual.subjectName}\nExperiments: ${manual.experimentsCount || 'Multiple'}\nInstructor: ${manual.uploadedBy}\n\nDescription:\n${manual.description}\n\n--- Verified Academic Laboratory Manual ---`,
-      ],
-      { type: 'text/plain' }
-    );
-    element.href = URL.createObjectURL(file);
-    element.download = manual.fileName.endsWith('.pdf')
-      ? manual.fileName.replace('.pdf', '.txt')
-      : `${manual.fileName}.txt`;
-    document.body.appendChild(element);
-    element.click();
-    document.body.removeChild(element);
+    const link = document.createElement('a');
+    const url = manual.fileUrl || `/api/files/lab-materials/${encodeURIComponent(manual.fileName)}`;
+    link.href = `${url}${url.includes('?') ? '&' : '?'}download=1`;
+    link.download = manual.fileName || 'LabManual.pdf';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
 
     setTimeout(() => {
       setDownloadSuccessId(null);
@@ -158,6 +154,9 @@ export const StudentLabManuals: React.FC<StudentLabManualsProps> = ({ onOpenPdf 
                       uploadedBy: manual.uploadedBy,
                       fileSize: manual.fileSize,
                       description: manual.description,
+                      fileUrl:
+                        manual.fileUrl ||
+                        `/api/files/lab-materials/${encodeURIComponent(manual.fileName)}`,
                     })
                   }
                   className="py-2 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs transition-colors flex items-center justify-center gap-1.5"

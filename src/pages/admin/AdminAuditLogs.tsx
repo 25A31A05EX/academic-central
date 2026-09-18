@@ -18,10 +18,12 @@ export const AdminAuditLogs: React.FC = () => {
   const [roleFilter, setRoleFilter] = useState('all');
 
   const filtered = auditLogs.filter((log) => {
+    const q = searchQuery.toLowerCase().trim();
     const matchesSearch =
-      log.action.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      log.performedBy.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      log.details.toLowerCase().includes(searchQuery.toLowerCase());
+      !q ||
+      (log.action || '').toLowerCase().includes(q) ||
+      (log.performedBy || (log as any).performed_by || '').toLowerCase().includes(q) ||
+      (log.details || '').toLowerCase().includes(q);
 
     const matchesRole = roleFilter === 'all' || log.role === roleFilter;
 

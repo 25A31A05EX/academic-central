@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   FileCheck2,
   Plus,
@@ -11,9 +11,14 @@ import {
   Eye,
   Award,
   Search,
+  Download,
+  AlertTriangle,
+  Loader2,
+  RefreshCw,
 } from 'lucide-react';
 import { useAcademicData } from '../../hooks/useAcademicData';
 import { storage } from '../../services/storageService';
+import { apiClient } from '../../services/api';
 import { Assignment, Submission } from '../../types';
 
 interface TeacherAssignmentsProps {
@@ -21,11 +26,15 @@ interface TeacherAssignmentsProps {
 }
 
 export const TeacherAssignments: React.FC<TeacherAssignmentsProps> = ({ onOpenPdf }) => {
-  const { assignments, subjects, teachers, submissions, students } = useAcademicData();
+  const { assignments: rawAssignments, subjects, teachers, submissions: rawSubmissions, students } = useAcademicData();
   const currentTeacher = teachers[0] || {
     id: 'teach-1',
     name: 'Dr. Priya Kumar',
   };
+
+  const [dynamicAssignments, setDynamicAssignments] = useState<Assignment[] | null>(null);
+  const [dynamicSubmissions, setDynamicSubmissions] = useState<any[] | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [activeSubmissionAssignment, setActiveSubmissionAssignment] =
@@ -38,51 +47,142 @@ export const TeacherAssignments: React.FC<TeacherAssignmentsProps> = ({ onOpenPd
   const [dueDate, setDueDate] = useState('');
   const [maxMarks, setMaxMarks] = useState(10);
   const [fileName, setFileName] = useState('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
   const [createSuccess, setCreateSuccess] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Grading state for submissions
   const [gradingScores, setGradingScores] = useState<Record<string, number>>({});
   const [gradingFeedback, setGradingFeedback] = useState<Record<string, string>>({});
   const [savedSubId, setSavedSubId] = useState<string | null>(null);
 
-  const handleCreateAssignment = (e: React.FormEvent) => {
-    e.preventDefault();
-    const subj = subjects.find((s) => s.id === selectedSubjectId) || subjects[0];
-
-    const generatedFileName =
-      fileName || `${subj.code}_Assignment_${Date.now().toString().slice(-4)}.pdf`;
-
-    storage.addAssignment({
-      title,
-      subjectId: subj.id,
-      subjectName: subj.name,
-      teacherId: currentTeacher.id,
-      teacherName: currentTeacher.name,
-      description,
-      dueDate: dueDate || new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
-      maxMarks: Number(maxMarks) || 10,
-      fileName: generatedFileName,
-      fileSize: '1.4 MB',
-      status: 'Published',
-    });
-
-    setCreateSuccess(true);
-    setTimeout(() => {
-      setCreateSuccess(false);
-      setShowCreateModal(false);
-      setTitle('');
-      setDescription('');
-      setDueDate('');
-      setFileName('');
-    }, 1200);
+  const fetchAssignmentsAndSubmissions = async () => {
+    setIsRefreshing(true);
+    try {
+      const [asgData, submData] = await Promise.all([
+        apiClient.getAssignments().catch(() => null),
+        apiClient.getSubmissions().catch(() => null),
+      ]);
+      if (Array.isArray(asgData) && asgData.length > 0) {
+        setDynamicAssignments(asgData);
+      }
+      if (Array.isArray(submData) && submData.length > 0) {
+        setDynamicSubmissions(submData);
+      }
+      await storage.syncWithServer().catch(() => {});
+    } catch (err) {
+      console.warn('Sync in TeacherAssignments:', err);
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
-  const handleSaveGrade = (submission: Submission, assignment: Assignment) => {
+  useEffect(() => {
+    fetchAssignmentsAndSubmissions();
+  }, []);
+
+  const assignments = dynamicAssignments || rawAssignments;
+  const submissions = dynamicSubmissions || rawSubmissions;
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFileError(null);
+    const file = e.target.files?.[0];
+    if (!file) {
+      setSelectedFile(null);
+      return;
+    }
+
+    // Strict PDF validation: check file type and extension
+    const isPdfType = file.type === 'application/pdf';
+    const isPdfExt = file.name.toLowerCase().endsWith('.pdf');
+    if (!isPdfType && !isPdfExt) {
+      setFileError('Invalid file type. Only genuine PDF documents (.pdf) are accepted.');
+      setSelectedFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    // Size limit validation (25MB)
+    const MAX_BYTES = 25 * 1024 * 1024;
+    if (file.size > MAX_BYTES) {
+      setFileError('File size exceeds the 25MB limit.');
+      setSelectedFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    setSelectedFile(file);
+    setFileName(file.name);
+  };
+
+  const handleCreateAssignment = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!selectedFile) {
+      setFileError('Please select a valid PDF file from your device before publishing.');
+      return;
+    }
+
+    const subj = subjects.find((s) => s.id === selectedSubjectId) || subjects[0];
+    setIsUploading(true);
+    setFileError(null);
+
+    try {
+      // 1. Send selected PDF to backend via multipart/form-data
+      const uploadResult = await apiClient.uploadPdfFile('assignments', selectedFile);
+
+      // 2. Save metadata and assignment in local storage and backend SQLite database
+      const newAsg = storage.addAssignment({
+        title,
+        subjectId: subj.id,
+        subjectName: subj.name,
+        teacherId: currentTeacher.id,
+        teacherName: currentTeacher.name,
+        description,
+        dueDate: dueDate || new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+        maxMarks: Number(maxMarks) || 10,
+        fileName: uploadResult.fileName,
+        fileUrl: uploadResult.fileUrl,
+        fileSize: uploadResult.fileSize,
+        status: 'Published',
+      });
+
+      // Synchronize with database
+      await apiClient.addAssignment(newAsg).catch(() => {});
+      await fetchAssignmentsAndSubmissions();
+
+      setCreateSuccess(true);
+      setTimeout(() => {
+        setCreateSuccess(false);
+        setShowCreateModal(false);
+        setTitle('');
+        setDescription('');
+        setDueDate('');
+        setFileName('');
+        setSelectedFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }, 1200);
+    } catch (err: any) {
+      console.error('Assignment creation failed:', err);
+      setFileError(err.message || 'Failed to upload assignment PDF to the server repository.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleSaveGrade = async (submission: Submission, assignment: Assignment) => {
     const score = gradingScores[submission.id] !== undefined ? gradingScores[submission.id] : 9;
     const feedback = gradingFeedback[submission.id] || 'Well documented code and logic.';
 
     storage.evaluateSubmission(submission.id, score, feedback);
     setSavedSubId(submission.id);
+
+    await apiClient
+      .evaluateSubmission(submission.id, score, feedback, currentTeacher.name)
+      .catch(() => {});
+    await fetchAssignmentsAndSubmissions();
 
     setTimeout(() => {
       setSavedSubId(null);
@@ -101,14 +201,27 @@ export const TeacherAssignments: React.FC<TeacherAssignmentsProps> = ({ onOpenPd
           </p>
         </div>
 
-        <button
-          id="btn-create-assignment"
-          onClick={() => setShowCreateModal(true)}
-          className="inline-flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-md shadow-indigo-600/20 transition-all self-start sm:self-auto"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Create Assignment</span>
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            id="btn-sync-teacher-assignments"
+            onClick={fetchAssignmentsAndSubmissions}
+            disabled={isRefreshing}
+            className="inline-flex items-center gap-2 px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all"
+            title="Synchronize assignments and submissions with server"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-indigo-600' : ''}`} />
+            <span>{isRefreshing ? 'Syncing...' : 'Sync'}</span>
+          </button>
+
+          <button
+            id="btn-create-assignment"
+            onClick={() => setShowCreateModal(true)}
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-md shadow-indigo-600/20 transition-all"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Create Assignment</span>
+          </button>
+        </div>
       </div>
 
       {/* Assignment List */}
@@ -167,6 +280,8 @@ export const TeacherAssignments: React.FC<TeacherAssignmentsProps> = ({ onOpenPd
                         type: 'Assignment PDF',
                         uploadedBy: asg.teacherName,
                         description: asg.description,
+                        fileUrl: asg.fileUrl,
+                        fileSize: asg.fileSize,
                       })
                     }
                     className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold transition-colors flex items-center gap-1.5"
@@ -174,6 +289,20 @@ export const TeacherAssignments: React.FC<TeacherAssignmentsProps> = ({ onOpenPd
                     <FileText className="w-4 h-4 text-slate-600" />
                     <span>View PDF</span>
                   </button>
+
+                  <a
+                    href={
+                      asg.fileUrl
+                        ? `${asg.fileUrl}${asg.fileUrl.includes('?') ? '&' : '?'}download=1`
+                        : `/api/files/assignments/${encodeURIComponent(asg.fileName)}?download=1`
+                    }
+                    download={asg.fileName || 'Assignment.pdf'}
+                    className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors flex items-center gap-1.5"
+                    title="Download Assignment PDF"
+                  >
+                    <Download className="w-4 h-4 text-slate-600" />
+                    <span className="hidden sm:inline">Download</span>
+                  </a>
 
                   <button
                     id={`btn-view-subs-${asg.id}`}
@@ -266,22 +395,40 @@ export const TeacherAssignments: React.FC<TeacherAssignmentsProps> = ({ onOpenPd
                             </p>
                           </div>
 
-                          <button
-                            onClick={() =>
-                              onOpenPdf({
-                                title: `Submission: ${sub.studentName} (${sub.rollNumber})`,
-                                fileName: sub.fileName,
-                                subjectName: activeSubmissionAssignment.subjectName,
-                                type: 'Student Submission',
-                                uploadedBy: sub.studentName,
-                                description: sub.notes || 'Solution source files and test logs.',
-                              })
-                            }
-                            className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-800 text-xs font-bold transition-colors flex items-center gap-1.5 self-start sm:self-auto"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                            <span>Preview Work</span>
-                          </button>
+                          <div className="flex items-center gap-2 self-start sm:self-auto">
+                            <button
+                              onClick={() =>
+                                onOpenPdf({
+                                  title: `Submission: ${sub.studentName} (${sub.rollNumber})`,
+                                  fileName: sub.fileName,
+                                  subjectName: activeSubmissionAssignment.subjectName,
+                                  type: 'Student Submission',
+                                  uploadedBy: sub.studentName,
+                                  description: sub.notes || 'Solution source files and test logs.',
+                                  fileUrl: sub.fileUrl,
+                                  fileSize: sub.fileSize,
+                                })
+                              }
+                              className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-800 text-xs font-bold transition-colors flex items-center gap-1.5"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>Preview Work</span>
+                            </button>
+
+                            <a
+                              href={
+                                sub.fileUrl && !sub.fileUrl.startsWith('#')
+                                  ? `${sub.fileUrl}${sub.fileUrl.includes('?') ? '&' : '?'}download=1`
+                                  : `/api/files/submissions/${encodeURIComponent(sub.fileName)}?download=1`
+                              }
+                              download={sub.fileName || 'Submission.pdf'}
+                              className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-bold transition-colors flex items-center gap-1.5"
+                              title="Download Student Submission PDF"
+                            >
+                              <Download className="w-3.5 h-3.5 text-slate-600" />
+                              <span className="hidden sm:inline">Download</span>
+                            </a>
+                          </div>
                         </div>
 
                         {sub.notes && (
@@ -468,39 +615,91 @@ export const TeacherAssignments: React.FC<TeacherAssignmentsProps> = ({ onOpenPd
                   </div>
                 </div>
 
-                {/* PDF Simulation Attachment */}
+                {/* Working HTML File Picker & PDF Document Attachment */}
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Upload Assignment PDF Document
-                  </label>
-                  <div className="p-3 border-2 border-dashed border-indigo-200 rounded-xl bg-indigo-50/30 text-center cursor-pointer">
-                    <UploadCloud className="w-6 h-6 text-indigo-600 mx-auto mb-1" />
-                    <p className="text-xs font-bold text-slate-800">
-                      {fileName || 'Drop assignment question paper PDF here'}
-                    </p>
-                    <input
-                      type="text"
-                      placeholder="Optional custom filename (e.g. DS_Lab_Asg_3.pdf)"
-                      value={fileName}
-                      onChange={(e) => setFileName(e.target.value)}
-                      className="mt-2 w-full px-3 py-1 bg-white border border-slate-200 rounded-lg text-xs font-mono"
-                    />
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                      Assignment Question Paper (PDF) <span className="text-rose-500">*</span>
+                    </label>
+                    {selectedFile && (
+                      <span className="text-[11px] font-semibold text-emerald-600 flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        PDF Selected ({(selectedFile.size / (1024 * 1024)).toFixed(2)} MB)
+                      </span>
+                    )}
                   </div>
+
+                  {/* Real HTML File Input */}
+                  <input
+                    ref={fileInputRef}
+                    id="teacher-assignment-pdf-input"
+                    type="file"
+                    accept=".pdf,application/pdf"
+                    onChange={handleFileChange}
+                    className="hidden"
+                  />
+
+                  {/* Interactive Picker Trigger & Dropzone */}
+                  <div
+                    onClick={() => fileInputRef.current?.click()}
+                    className={`p-4 border-2 border-dashed rounded-xl text-center cursor-pointer transition-colors ${
+                      fileError
+                        ? 'border-red-300 bg-red-50/50 hover:bg-red-50'
+                        : selectedFile
+                        ? 'border-emerald-300 bg-emerald-50/40 hover:bg-emerald-50/60'
+                        : 'border-indigo-200 bg-indigo-50/30 hover:bg-indigo-50/60'
+                    }`}
+                  >
+                    <UploadCloud
+                      className={`w-7 h-7 mx-auto mb-1 ${
+                        selectedFile ? 'text-emerald-600' : 'text-indigo-600'
+                      }`}
+                    />
+                    <p className="text-xs font-bold text-slate-800">
+                      {selectedFile ? selectedFile.name : 'Choose PDF file from your device'}
+                    </p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      {selectedFile
+                        ? 'Click here if you want to select a different PDF file'
+                        : 'Only .pdf files are accepted (Max size: 25MB)'}
+                    </p>
+                  </div>
+
+                  {/* Clear Error Message for Invalid File Types or Size */}
+                  {fileError && (
+                    <div className="mt-2 p-2.5 bg-red-50 border border-red-200 rounded-xl text-red-700 text-xs flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-red-600" />
+                      <span>{fileError}</span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="pt-2 flex justify-end gap-2">
                   <button
                     type="button"
-                    onClick={() => setShowCreateModal(false)}
-                    className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 border border-slate-200"
+                    disabled={isUploading}
+                    onClick={() => {
+                      setShowCreateModal(false);
+                      setFileError(null);
+                      setSelectedFile(null);
+                    }}
+                    className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 disabled:opacity-50"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-xs"
+                    disabled={isUploading}
+                    className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-xs flex items-center gap-2 disabled:opacity-60"
                   >
-                    Publish Assignment
+                    {isUploading ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Uploading PDF & Publishing...</span>
+                      </>
+                    ) : (
+                      <span>Publish Assignment</span>
+                    )}
                   </button>
                 </div>
               </form>

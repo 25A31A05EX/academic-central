@@ -107,10 +107,12 @@ export const AdminStudents: React.FC = () => {
 
   // Filter students
   const filteredStudents = students.filter((s) => {
+    const q = searchQuery.toLowerCase().trim();
     const matchesSearch =
-      s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.rollNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.email.toLowerCase().includes(searchQuery.toLowerCase());
+      !q ||
+      (s.name || '').toLowerCase().includes(q) ||
+      (s.rollNumber || (s as any).roll_number || '').toLowerCase().includes(q) ||
+      (s.email || '').toLowerCase().includes(q);
 
     const matchesBranch = branchFilter === 'all' || s.branch === branchFilter;
     const matchesSection = sectionFilter === 'all' || s.section === sectionFilter;

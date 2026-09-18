@@ -21,6 +21,8 @@ export interface StudentProfile {
   semester: number;
   status: 'Active' | 'Inactive';
   phone?: string;
+  bloodGroup?: string;
+  attendancePercentage?: number;
   cgpa: number;
 }
 
@@ -109,6 +111,7 @@ export type Submission = StudentSubmission;
 export interface SubjectMarks {
   id: string;
   studentId: string;
+  studentName?: string;
   subjectId: string;
   subjectName: string;
   subjectCode: string;
@@ -122,6 +125,7 @@ export interface SubjectMarks {
   assignmentMax: number;
   labInternal: number;
   labInternalMax: number;
+  totalInternal?: number;
   remarks?: string;
   updatedAt: string;
 }

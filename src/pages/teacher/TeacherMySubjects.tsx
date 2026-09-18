@@ -10,6 +10,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useAcademicData } from '../../hooks/useAcademicData';
+import { storage } from '../../services/storageService';
 import { Subject } from '../../types';
 
 interface TeacherMySubjectsProps {
@@ -21,22 +22,49 @@ export const TeacherMySubjects: React.FC<TeacherMySubjectsProps> = ({
   onNavigateTab,
   onOpenPdf,
 }) => {
-  const { subjects, assignments, labMaterials, students, marks } = useAcademicData();
+  const { subjects, assignments, labMaterials, students, marks, teachers } = useAcademicData();
+  const currentUser = storage.getCurrentUser();
+  const currentTeacher =
+    teachers.find((t) => t.userId === currentUser?.id || t.email === currentUser?.email) ||
+    teachers[0];
 
-  // Primary teacher Dr. Priya Kumar
-  const mySubjects = subjects.filter(
-    (s) =>
-      s.teacherName.includes('Priya') ||
-      s.teacherId === 'teach-1' ||
+  // Safely resolve teacher's assigned subjects
+  const mySubjects = subjects.filter((s) => {
+    const tName = (s.teacherName || (s as any).teacher_name || '').toLowerCase();
+    const tId = s.teacherId || (s as any).teacher_id || '';
+    const currentName = (currentTeacher?.name || 'Priya').toLowerCase();
+    const isAssigned =
+      currentTeacher?.assignedSubjectIds &&
+      Array.isArray(currentTeacher.assignedSubjectIds) &&
+      currentTeacher.assignedSubjectIds.includes(s.id);
+
+    return (
+      isAssigned ||
+      (currentName && tName.includes(currentName)) ||
+      tName.includes('priya') ||
+      tId === currentTeacher?.id ||
+      tId === 'teach-1' ||
       s.code === 'CS401' ||
       s.code === 'CS404'
-  );
+    );
+  });
 
-  const [activeSubject, setActiveSubject] = useState<Subject>(mySubjects[0] || subjects[0]);
+  const [selectedSubjectId, setSelectedSubjectId] = useState<string>('');
+  const activeSubject =
+    mySubjects.find((s) => s.id === selectedSubjectId) ||
+    mySubjects[0] ||
+    subjects[0];
+  const activeSubjectId = activeSubject?.id || '';
 
-  const subjectAssignments = assignments.filter((a) => a.subjectId === activeSubject.id);
-  const subjectMaterials = labMaterials.filter((m) => m.subjectId === activeSubject.id);
-  const subjectMarks = marks.filter((m) => m.subjectId === activeSubject.id);
+  const subjectAssignments = activeSubjectId
+    ? assignments.filter((a) => (a.subjectId || (a as any).subject_id) === activeSubjectId)
+    : [];
+  const subjectMaterials = activeSubjectId
+    ? labMaterials.filter((m) => (m.subjectId || (m as any).subject_id) === activeSubjectId)
+    : [];
+  const subjectMarks = activeSubjectId
+    ? marks.filter((m) => (m.subjectId || (m as any).subject_id) === activeSubjectId)
+    : [];
 
   return (
     <div className="space-y-6">
@@ -54,11 +82,11 @@ export const TeacherMySubjects: React.FC<TeacherMySubjectsProps> = ({
       {/* Subject Selection Tabs */}
       <div className="flex flex-wrap gap-2">
         {mySubjects.map((sub) => {
-          const isSelected = activeSubject.id === sub.id;
+          const isSelected = activeSubject?.id === sub.id;
           return (
             <button
               key={sub.id}
-              onClick={() => setActiveSubject(sub)}
+              onClick={() => setSelectedSubjectId(sub.id)}
               className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 border ${
                 isSelected
                   ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm shadow-indigo-600/20'
@@ -80,20 +108,25 @@ export const TeacherMySubjects: React.FC<TeacherMySubjectsProps> = ({
       </div>
 
       {/* Active Subject Control Board */}
-      <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-6">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-100">
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <span className="font-mono text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2.5 py-0.5 rounded-lg">
-                {activeSubject.code}
-              </span>
-              <span className="text-xs text-slate-500 font-semibold">
-                Semester {activeSubject.semester} &bull; {activeSubject.credits} Credits
-              </span>
+      {!activeSubject ? (
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-500 text-xs">
+          No courses currently assigned or found.
+        </div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-6">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="font-mono text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2.5 py-0.5 rounded-lg">
+                  {activeSubject.code}
+                </span>
+                <span className="text-xs text-slate-500 font-semibold">
+                  Semester {activeSubject.semester} &bull; {activeSubject.credits} Credits
+                </span>
+              </div>
+              <h3 className="text-xl font-black text-slate-900">{activeSubject.name}</h3>
+              <p className="text-xs text-slate-600 mt-1 max-w-2xl">{activeSubject.description}</p>
             </div>
-            <h3 className="text-xl font-black text-slate-900">{activeSubject.name}</h3>
-            <p className="text-xs text-slate-600 mt-1 max-w-2xl">{activeSubject.description}</p>
-          </div>
 
           <div className="flex items-center gap-2 self-start md:self-center">
             <button
@@ -233,6 +266,7 @@ export const TeacherMySubjects: React.FC<TeacherMySubjectsProps> = ({
           </div>
         </div>
       </div>
-    </div>
-  );
+    )}
+  </div>
+);
 };

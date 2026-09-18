@@ -62,20 +62,40 @@ export function subscribeToStore(listener: Listener) {
   };
 }
 
+const storeCache: Record<string, any> = {};
+
+function clearStoreCache(): void {
+  for (const key of Object.keys(storeCache)) {
+    delete storeCache[key];
+  }
+}
+
 function getStored<T>(key: string, defaultValue: T): T {
+  if (Object.prototype.hasOwnProperty.call(storeCache, key)) {
+    return storeCache[key];
+  }
   try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return defaultValue;
-    return JSON.parse(raw);
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null;
+    if (!raw) {
+      storeCache[key] = defaultValue;
+      return defaultValue;
+    }
+    const parsed = JSON.parse(raw);
+    storeCache[key] = parsed;
+    return parsed;
   } catch (e) {
     console.error(`Error reading ${key} from storage:`, e);
+    storeCache[key] = defaultValue;
     return defaultValue;
   }
 }
 
 function setStored<T>(key: string, value: T): void {
+  storeCache[key] = value;
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(key, JSON.stringify(value));
+    }
   } catch (e) {
     console.error(`Error writing ${key} to storage:`, e);
   }
@@ -150,7 +170,14 @@ class AcademicStore {
 
   // Students
   getStudents(): StudentProfile[] {
-    return getStored<StudentProfile[]>(STORAGE_KEYS.STUDENTS, INITIAL_STUDENTS);
+    const list = getStored<StudentProfile[]>(STORAGE_KEYS.STUDENTS, INITIAL_STUDENTS);
+    return list.map((s, idx) => ({
+      ...s,
+      userId: s.userId || (s as any).user_id || `user-student-${idx + 1}`,
+      rollNumber: s.rollNumber || (s as any).roll_number || `23CS${100 + idx}`,
+      bloodGroup: s.bloodGroup || (s as any).blood_group || 'O+',
+      attendancePercentage: s.attendancePercentage ?? (s as any).attendance_percentage ?? 85,
+    }));
   }
 
   getStudentByUserId(userId: string): StudentProfile | undefined {
@@ -221,7 +248,10 @@ class AcademicStore {
   // Teachers
   getTeachers(): TeacherProfile[] {
     const list = getStored<TeacherProfile[]>(STORAGE_KEYS.TEACHERS, INITIAL_TEACHERS);
-    return list.map((t, idx) => ({
+    if ((list as any)._normalized) {
+      return list;
+    }
+    const normalized = list.map((t, idx) => ({
       ...t,
       userId: t.userId || (t as any).user_id || `user-teacher-${idx + 1}`,
       employeeId: t.employeeId || (t as any).employee_id || `EMP-CS-${100 + idx}`,
@@ -229,6 +259,9 @@ class AcademicStore {
       subjectsAssigned: t.subjectsAssigned || [],
       assignedSubjectIds: t.assignedSubjectIds || [],
     }));
+    Object.defineProperty(normalized, '_normalized', { value: true, enumerable: false });
+    storeCache[STORAGE_KEYS.TEACHERS] = normalized;
+    return normalized;
   }
 
   getTeacherByUserId(userId: string): TeacherProfile | undefined {
@@ -317,7 +350,12 @@ class AcademicStore {
 
   // Subjects
   getSubjects(): Subject[] {
-    return getStored<Subject[]>(STORAGE_KEYS.SUBJECTS, INITIAL_SUBJECTS);
+    const list = getStored<Subject[]>(STORAGE_KEYS.SUBJECTS, INITIAL_SUBJECTS);
+    return list.map((s) => ({
+      ...s,
+      teacherId: s.teacherId || (s as any).teacher_id || 'teach-1',
+      teacherName: s.teacherName || (s as any).teacher_name || 'Faculty',
+    }));
   }
 
   addSubject(subject: Omit<Subject, 'id'>): Subject {
@@ -400,7 +438,19 @@ class AcademicStore {
 
   // Assignments
   getAssignments(): Assignment[] {
-    return getStored<Assignment[]>(STORAGE_KEYS.ASSIGNMENTS, INITIAL_ASSIGNMENTS);
+    const list = getStored<Assignment[]>(STORAGE_KEYS.ASSIGNMENTS, INITIAL_ASSIGNMENTS);
+    return list.map((a) => ({
+      ...a,
+      subjectId: a.subjectId || (a as any).subject_id || '',
+      subjectName: a.subjectName || (a as any).subject_name || 'Subject',
+      teacherId: a.teacherId || (a as any).teacher_id || 'teach-1',
+      teacherName: a.teacherName || (a as any).teacher_name || 'Faculty',
+      fileUrl: a.fileUrl || (a as any).file_url || null,
+      fileName: a.fileName || (a as any).file_name || 'Assignment.pdf',
+      fileSize: a.fileSize || (a as any).file_size || '1.2 MB',
+      dueDate: a.dueDate || (a as any).due_date || new Date().toISOString(),
+      maxMarks: a.maxMarks ?? (a as any).max_marks ?? 10,
+    }));
   }
 
   addAssignment(assignment: Omit<Assignment, 'id' | 'createdAt'>): Assignment {
@@ -429,6 +479,11 @@ class AcademicStore {
       'Create Assignment',
       `Published assignment: ${newAssignment.title} for ${newAssignment.subjectName}.`
     );
+
+    // Sync to backend SQLite database
+    apiClient.addAssignment(newAssignment).catch((err) => {
+      console.warn('Sync assignment to DB warning:', err);
+    });
 
     notify();
     return newAssignment;
@@ -459,7 +514,8 @@ class AcademicStore {
     studentName: string,
     rollNumber: string,
     fileName: string,
-    notes?: string
+    notes?: string,
+    fileUrl?: string
   ): StudentSubmission {
     const list = this.getSubmissions();
     const existingIndex = list.findIndex(
@@ -474,7 +530,7 @@ class AcademicStore {
       rollNumber,
       submittedAt: new Date().toISOString(),
       fileName: fileName || 'Assignment_Submission.pdf',
-      fileUrl: '#preview-submission',
+      fileUrl: fileUrl || `/api/files/submissions/${fileName || 'Assignment_Submission.pdf'}`,
       notes,
       status: 'Submitted',
     };
@@ -487,6 +543,20 @@ class AcademicStore {
       updated = [submission, ...list];
     }
     setStored(STORAGE_KEYS.SUBMISSIONS, updated);
+
+    // Sync to backend SQLite database
+    apiClient.submitAssignment({
+      assignmentId,
+      studentId,
+      studentName,
+      rollNumber,
+      fileName: submission.fileName,
+      fileUrl: submission.fileUrl,
+      notes: submission.notes,
+      status: submission.status,
+    }).catch((err) => {
+      console.warn('Sync submission to DB warning:', err);
+    });
 
     this.addNotification({
       userId: 'user-teacher-1',
@@ -538,7 +608,18 @@ class AcademicStore {
 
   // Marks
   getMarks(): SubjectMarks[] {
-    return getStored<SubjectMarks[]>(STORAGE_KEYS.MARKS, INITIAL_MARKS);
+    const list = getStored<SubjectMarks[]>(STORAGE_KEYS.MARKS, INITIAL_MARKS);
+    return list.map((m) => ({
+      ...m,
+      studentId: m.studentId || (m as any).student_id || '',
+      studentName: m.studentName || (m as any).student_name || 'Student',
+      subjectId: m.subjectId || (m as any).subject_id || '',
+      subjectName: m.subjectName || (m as any).subject_name || 'Subject',
+      subjectCode: m.subjectCode || (m as any).subject_code || '',
+      classTest: m.classTest ?? (m as any).class_test ?? 0,
+      labInternal: m.labInternal ?? (m as any).lab_internal ?? 0,
+      totalInternal: m.totalInternal ?? (m as any).total_internal ?? 0,
+    }));
   }
 
   getStudentMarks(studentId: string): SubjectMarks[] {
@@ -600,6 +681,75 @@ class AcademicStore {
       'teacher',
       'Marks Evaluation',
       `Recorded ${assessmentType} marks for student in ${subjectName}: ${score} pts.`
+    );
+    notify();
+  }
+
+  batchUpdateStudentMarks(
+    updates: Array<{
+      studentId: string;
+      subjectId: string;
+      assessmentType: string;
+      score: number;
+      remark?: string;
+    }>,
+    teacherName: string = 'Faculty'
+  ): void {
+    if (!updates.length) return;
+    const allMarks = [...this.getMarks()];
+    const subjects = this.getSubjects();
+
+    updates.forEach(({ studentId, subjectId, assessmentType, score, remark }) => {
+      const currentSubject = subjects.find((s) => s.id === subjectId);
+      const subjectName = currentSubject ? currentSubject.name : 'Subject';
+      const subjectCode = currentSubject ? currentSubject.code : 'CS';
+      const normalizedType = assessmentType.toLowerCase().replace(/[\s-]/g, '');
+
+      const existingIndex = allMarks.findIndex(
+        (m) => m.studentId === studentId && m.subjectId === subjectId
+      );
+
+      if (existingIndex >= 0) {
+        const existing = { ...allMarks[existingIndex] };
+        if (normalizedType.includes('mid1')) existing.mid1 = Number(score);
+        else if (normalizedType.includes('mid2')) existing.mid2 = Number(score);
+        else if (normalizedType.includes('class') || normalizedType.includes('test')) existing.classTest = Number(score);
+        else if (normalizedType.includes('assign')) existing.assignment = Number(score);
+        else if (normalizedType.includes('lab') || normalizedType.includes('internal')) existing.labInternal = Number(score);
+        if (remark !== undefined) existing.remarks = remark;
+        existing.updatedAt = new Date().toISOString();
+        allMarks[existingIndex] = existing;
+      } else {
+        const newRecord: SubjectMarks = {
+          id: `mark-${Date.now()}-${studentId}`,
+          studentId,
+          subjectId,
+          subjectName,
+          subjectCode,
+          mid1: normalizedType.includes('mid1') ? Number(score) : 0,
+          mid1Max: 30,
+          mid2: normalizedType.includes('mid2') ? Number(score) : 0,
+          mid2Max: 30,
+          classTest: normalizedType.includes('class') || normalizedType.includes('test') ? Number(score) : 0,
+          classTestMax: 20,
+          assignment: normalizedType.includes('assign') ? Number(score) : 0,
+          assignmentMax: 10,
+          labInternal: normalizedType.includes('lab') || normalizedType.includes('internal') ? Number(score) : 0,
+          labInternalMax: 20,
+          remarks: remark || '',
+          updatedAt: new Date().toISOString(),
+        };
+        allMarks.push(newRecord);
+      }
+    });
+
+    setStored(STORAGE_KEYS.MARKS, allMarks);
+    this.addAuditLog(
+      'teacher-1',
+      teacherName,
+      'teacher',
+      'Marks Evaluation',
+      `Batch updated ${updates[0]?.assessmentType || 'assessment'} marks for ${updates.length} students.`
     );
     notify();
   }
@@ -866,7 +1016,10 @@ class AcademicStore {
 
   // Reset to default seed
   resetToDefaultData(): void {
-    localStorage.clear();
+    if (typeof localStorage !== 'undefined') {
+      localStorage.clear();
+    }
+    clearStoreCache();
     setStored(STORAGE_KEYS.USERS, INITIAL_USERS);
     setStored(STORAGE_KEYS.STUDENTS, INITIAL_STUDENTS);
     setStored(STORAGE_KEYS.TEACHERS, INITIAL_TEACHERS);

@@ -247,6 +247,8 @@ export const StudentSubjects: React.FC<StudentSubjectsProps> = ({
                             type: 'Assignment PDF',
                             uploadedBy: asg.teacherName,
                             description: asg.description,
+                            fileUrl: asg.fileUrl,
+                            fileSize: asg.fileSize,
                           });
                         }}
                         className="px-2.5 py-1 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-bold rounded-lg text-xs transition-colors"
@@ -289,6 +291,8 @@ export const StudentSubjects: React.FC<StudentSubjectsProps> = ({
                             type: mat.type,
                             uploadedBy: mat.uploadedBy,
                             description: mat.description,
+                            fileUrl: mat.fileUrl,
+                            fileSize: mat.fileSize,
                           });
                         }}
                         className="px-2.5 py-1 bg-purple-50 text-purple-700 hover:bg-purple-100 font-bold rounded-lg text-xs transition-colors"

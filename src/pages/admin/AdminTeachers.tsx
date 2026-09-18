@@ -256,7 +256,9 @@ export const AdminTeachers: React.FC = () => {
       // Search inside subjects as well
       const teacherSubs = getTeacherSubjects(t);
       const subMatch = teacherSubs.some(
-        (s) => s.name.toLowerCase().includes(q) || s.code.toLowerCase().includes(q)
+        (s) =>
+          (s?.name || '').toLowerCase().includes(q) ||
+          (s?.code || '').toLowerCase().includes(q)
       );
 
       const matchesSearch = !q || nameMatch || empMatch || emailMatch || deptMatch || subMatch;

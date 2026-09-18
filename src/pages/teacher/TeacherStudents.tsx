@@ -13,12 +13,15 @@ export const TeacherStudents: React.FC = () => {
   const { students, subjects, marks } = useAcademicData();
   const [searchQuery, setSearchQuery] = useState('');
 
-  const filtered = students.filter(
-    (s) =>
-      s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.rollNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.email.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filtered = students.filter((s) => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!q) return true;
+    return (
+      (s.name || '').toLowerCase().includes(q) ||
+      (s.rollNumber || (s as any).roll_number || '').toLowerCase().includes(q) ||
+      (s.email || '').toLowerCase().includes(q)
+    );
+  });
 
   return (
     <div className="space-y-6">

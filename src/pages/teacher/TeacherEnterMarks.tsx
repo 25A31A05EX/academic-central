@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   FileEdit,
   Save,
@@ -40,37 +40,41 @@ export const TeacherEnterMarks: React.FC = () => {
 
   const maxMarks = maxMarksMap[assessmentType] || 30;
   const currentSubject = subjects.find((s) => s.id === selectedSubjectId) || subjects[0];
+  const activeSubjectId = selectedSubjectId || subjects[0]?.id || '';
 
-  // Populate initial scores when subject or assessment type changes
-  useEffect(() => {
-    const scores: Record<string, number> = {};
-    const remarks: Record<string, string> = {};
+  // Get score for a student without running an effect
+  const getStudentScore = (studentId: string): number => {
+    const key = `${activeSubjectId}:${assessmentType}:${studentId}`;
+    if (editableScores[key] !== undefined) {
+      return editableScores[key];
+    }
+    const existing = marks.find(
+      (m) => m.studentId === studentId && m.subjectId === activeSubjectId
+    );
+    if (existing) {
+      if (assessmentType === 'Mid-1') return existing.mid1;
+      if (assessmentType === 'Mid-2') return existing.mid2;
+      if (assessmentType === 'Class Test') return existing.classTest;
+      if (assessmentType === 'Assignment') return existing.assignment;
+      if (assessmentType === 'Lab Internal') return existing.labInternal;
+    }
+    return Math.round(maxMarks * 0.8);
+  };
 
-    students.forEach((student) => {
-      const existing = marks.find(
-        (m) => m.studentId === student.id && m.subjectId === selectedSubjectId
-      );
-
-      if (existing) {
-        let val = 0;
-        if (assessmentType === 'Mid-1') val = existing.mid1;
-        else if (assessmentType === 'Mid-2') val = existing.mid2;
-        else if (assessmentType === 'Class Test') val = existing.classTest;
-        else if (assessmentType === 'Assignment') val = existing.assignment;
-        else if (assessmentType === 'Lab Internal') val = existing.labInternal;
-
-        scores[student.id] = val;
-        remarks[student.id] = existing.remarks || 'Satisfactory';
-      } else {
-        scores[student.id] = Math.round(maxMarks * 0.8);
-        remarks[student.id] = 'Active participation';
-      }
-    });
-
-    setEditableScores(scores);
-    setEditableRemarks(remarks);
-    setErrors({});
-  }, [selectedSubjectId, assessmentType, marks, students, maxMarks]);
+  // Get remark for a student without running an effect
+  const getStudentRemark = (studentId: string): string => {
+    const key = `${activeSubjectId}:${assessmentType}:${studentId}`;
+    if (editableRemarks[key] !== undefined) {
+      return editableRemarks[key];
+    }
+    const existing = marks.find(
+      (m) => m.studentId === studentId && m.subjectId === activeSubjectId
+    );
+    if (existing && existing.remarks) {
+      return existing.remarks;
+    }
+    return existing ? 'Satisfactory' : 'Active participation';
+  };
 
   const handleScoreChange = (studentId: string, valStr: string) => {
     const val = Number(valStr);
@@ -87,17 +91,19 @@ export const TeacherEnterMarks: React.FC = () => {
     }
 
     setErrors(newErrors);
-    setEditableScores({
-      ...editableScores,
-      [studentId]: val,
-    });
+    const key = `${activeSubjectId}:${assessmentType}:${studentId}`;
+    setEditableScores((prev) => ({
+      ...prev,
+      [key]: isNaN(val) ? 0 : val,
+    }));
   };
 
   const handleRemarksChange = (studentId: string, text: string) => {
-    setEditableRemarks({
-      ...editableRemarks,
-      [studentId]: text,
-    });
+    const key = `${activeSubjectId}:${assessmentType}:${studentId}`;
+    setEditableRemarks((prev) => ({
+      ...prev,
+      [key]: text,
+    }));
   };
 
   const handleSaveAllMarks = () => {
@@ -109,19 +115,16 @@ export const TeacherEnterMarks: React.FC = () => {
     setIsSaving(true);
 
     setTimeout(() => {
-      students.forEach((student) => {
-        const score = editableScores[student.id] !== undefined ? editableScores[student.id] : 0;
-        const remark = editableRemarks[student.id] || '';
+      const subId = activeSubjectId;
+      const updates = students.map((student) => ({
+        studentId: student.id,
+        subjectId: subId,
+        assessmentType,
+        score: getStudentScore(student.id),
+        remark: getStudentRemark(student.id),
+      }));
 
-        storage.updateStudentMarks(
-          student.id,
-          selectedSubjectId,
-          assessmentType,
-          score,
-          remark,
-          currentTeacher.name
-        );
-      });
+      storage.batchUpdateStudentMarks(updates, currentTeacher.name);
 
       setIsSaving(false);
       setSaveSuccess(true);
@@ -254,7 +257,8 @@ export const TeacherEnterMarks: React.FC = () => {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {students.map((stud) => {
-                const currentScore = editableScores[stud.id] ?? 0;
+                const currentScore = getStudentScore(stud.id);
+                const currentRemark = getStudentRemark(stud.id);
                 const err = errors[stud.id];
 
                 return (
@@ -303,7 +307,7 @@ export const TeacherEnterMarks: React.FC = () => {
                       <input
                         type="text"
                         placeholder="e.g. Excellent analytical performance"
-                        value={editableRemarks[stud.id] || ''}
+                        value={currentRemark}
                         onChange={(e) => handleRemarksChange(stud.id, e.target.value)}
                         className="w-full max-w-xs px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800"
                       />

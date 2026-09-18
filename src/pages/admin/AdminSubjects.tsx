@@ -97,12 +97,14 @@ export const AdminSubjects: React.FC = () => {
     }
   };
 
-  const filteredSubjects = subjects.filter(
-    (s) =>
-      s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.code.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.teacherName.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredSubjects = subjects.filter((s) => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!q) return true;
+    const nameMatch = (s.name || '').toLowerCase().includes(q);
+    const codeMatch = (s.code || '').toLowerCase().includes(q);
+    const teacherMatch = (s.teacherName || (s as any).teacher_name || '').toLowerCase().includes(q);
+    return nameMatch || codeMatch || teacherMatch;
+  });
 
   return (
     <div className="space-y-6">

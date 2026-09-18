@@ -1,9 +1,25 @@
 import express from 'express';
+import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
 import { queryAll, queryOne, runQuery, getDb, saveDb } from './db.js';
 
 export const apiRouter = express.Router();
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB max
+  fileFilter: (req, file, cb) => {
+    const isPdf =
+      file.mimetype === 'application/pdf' ||
+      file.originalname.toLowerCase().endsWith('.pdf');
+    if (isPdf) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file format: Only PDF files (.pdf) are permitted.'));
+    }
+  },
+});
 
 const UPLOADS_ROOT = path.join(process.cwd(), 'data', 'uploads');
 fs.mkdirSync(path.join(UPLOADS_ROOT, 'assignments'), { recursive: true });
@@ -49,6 +65,79 @@ apiRouter.get('/bootstrap', async (req, res) => {
       subjects: typeof r.subjects_json === 'string' ? JSON.parse(r.subjects_json) : r.subjects_json,
     }));
 
+    // Format collections to camelCase
+    const formattedSubjects = subjects.map((s: any) => ({
+      ...s,
+      teacherId: s.teacher_id || s.teacherId || 'teach-1',
+      teacherName: s.teacher_name || s.teacherName || 'Faculty',
+    }));
+
+    const formattedStudents = students.map((st: any) => ({
+      ...st,
+      userId: st.user_id || st.userId,
+      rollNumber: st.roll_number || st.rollNumber,
+      bloodGroup: st.blood_group || st.bloodGroup,
+      attendancePercentage: st.attendance_percentage ?? st.attendancePercentage ?? 85,
+    }));
+
+    const formattedAssignments = assignments.map((a: any) => ({
+      ...a,
+      subjectId: a.subject_id || a.subjectId,
+      subjectName: a.subject_name || a.subjectName,
+      teacherId: a.teacher_id || a.teacherId,
+      teacherName: a.teacher_name || a.teacherName,
+      fileUrl: a.file_url || a.fileUrl,
+      fileName: a.file_name || a.fileName,
+      fileSize: a.file_size || a.fileSize,
+      dueDate: a.due_date || a.dueDate,
+      maxMarks: a.max_marks ?? a.maxMarks ?? 10,
+      createdAt: a.created_at || a.createdAt,
+    }));
+
+    const formattedSubmissions = submissions.map((sub: any) => ({
+      ...sub,
+      assignmentId: sub.assignment_id || sub.assignmentId,
+      assignmentTitle: sub.assignment_title || sub.assignmentTitle,
+      studentId: sub.student_id || sub.studentId,
+      studentName: sub.student_name || sub.studentName,
+      rollNumber: sub.roll_number || sub.rollNumber,
+      submittedAt: sub.submitted_at || sub.submittedAt,
+      fileUrl: sub.file_url || sub.fileUrl,
+      fileName: sub.file_name || sub.fileName,
+      fileSize: sub.file_size || sub.fileSize,
+      obtainedMarks: sub.obtained_marks ?? sub.obtainedMarks,
+    }));
+
+    const formattedMarks = marks.map((m: any) => ({
+      ...m,
+      studentId: m.student_id || m.studentId,
+      studentName: m.student_name || m.studentName,
+      subjectId: m.subject_id || m.subjectId,
+      subjectName: m.subject_name || m.subjectName,
+      subjectCode: m.subject_code || m.subjectCode,
+      classTest: m.class_test ?? m.classTest ?? 0,
+      labInternal: m.lab_internal ?? m.labInternal ?? 0,
+      totalInternal: m.total_internal ?? m.totalInternal ?? 0,
+    }));
+
+    const formattedLabMaterials = labMaterials.map((lm: any) => ({
+      ...lm,
+      subjectId: lm.subject_id || lm.subjectId,
+      subjectName: lm.subject_name || lm.subjectName,
+      uploadedBy: lm.uploaded_by || lm.uploadedBy,
+      fileUrl: lm.file_url || lm.fileUrl,
+      fileName: lm.file_name || lm.fileName,
+      fileSize: lm.file_size || lm.fileSize,
+      experimentsCount: lm.experiments_count ?? lm.experimentsCount,
+      createdAt: lm.created_at || lm.createdAt,
+    }));
+
+    const formattedAuditLogs = auditLogs.map((log: any) => ({
+      ...log,
+      performedBy: log.performed_by || log.performedBy || 'User',
+      userId: log.user_id || log.userId,
+    }));
+
     // Attach assigned subjects to teachers
     const teacherSubjects = queryAll('SELECT * FROM teacher_subjects');
     const formattedTeachers = teachers.map((t: any) => {
@@ -70,18 +159,18 @@ apiRouter.get('/bootstrap', async (req, res) => {
       success: true,
       data: {
         users,
-        students,
+        students: formattedStudents,
         teachers: formattedTeachers,
-        subjects,
+        subjects: formattedSubjects,
         classes,
-        assignments,
-        submissions,
+        assignments: formattedAssignments,
+        submissions: formattedSubmissions,
         assessments,
-        marks,
+        marks: formattedMarks,
         semesterResults: formattedSemesterResults,
-        labMaterials,
+        labMaterials: formattedLabMaterials,
         notifications,
-        auditLogs,
+        auditLogs: formattedAuditLogs,
       },
     });
   } catch (error: any) {
@@ -608,8 +697,12 @@ apiRouter.get('/files/:category/:filename', (req, res) => {
       }
     }
 
+    const isDownload = req.query.download === '1' || req.query.download === 'true';
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${safeFilename}"`);
+    res.setHeader(
+      'Content-Disposition',
+      `${isDownload ? 'attachment' : 'inline'}; filename="${safeFilename}"`
+    );
     const stream = fs.createReadStream(filePath);
     stream.pipe(res);
   } catch (error: any) {
@@ -617,76 +710,119 @@ apiRouter.get('/files/:category/:filename', (req, res) => {
   }
 });
 
-// Binary/Base64 File Upload Endpoint for Assignments, Lab Materials, and Submissions
+// Multipart (FormData) and Base64 File Upload Endpoint for Assignments, Lab Materials, and Submissions
 apiRouter.post('/files/upload', (req, res) => {
-  try {
-    const auth = getAuthUser(req);
-    const { category, fileName, fileBase64, subjectId, assignmentId, studentId, studentName, rollNumber } = req.body;
-
-    const allowedCategories = ['assignments', 'lab-materials', 'submissions'];
-    if (!allowedCategories.includes(category)) {
-      return res.status(400).json({ success: false, message: 'Invalid category' });
+  upload.single('file')(req, res, (uploadErr: any) => {
+    if (uploadErr) {
+      return res.status(400).json({
+        success: false,
+        message: uploadErr.message || 'Invalid file format: Only PDF files (.pdf) are permitted.',
+      });
     }
 
-    if (!fileBase64 || !fileName) {
-      return res.status(400).json({ success: false, message: 'File payload and fileName are required' });
+    try {
+      const auth = getAuthUser(req);
+      const category = req.body?.category || 'assignments';
+
+      const allowedCategories = ['assignments', 'lab-materials', 'submissions'];
+      if (!allowedCategories.includes(category)) {
+        return res.status(400).json({ success: false, message: 'Invalid file category specified.' });
+      }
+
+      // Role checks
+      if ((category === 'assignments' || category === 'lab-materials') && auth.role === 'student') {
+        return res.status(403).json({
+          success: false,
+          message: 'Access forbidden: Students cannot publish assignment sheets or lab materials.',
+        });
+      }
+
+      let buffer: Buffer;
+      let originalFileName: string;
+
+      // Check if uploaded via multipart/form-data
+      if (req.file) {
+        buffer = req.file.buffer;
+        originalFileName = req.file.originalname;
+      } else if (req.body?.fileBase64 && req.body?.fileName) {
+        // Fallback for base64 encoded uploads
+        const base64Data = req.body.fileBase64.replace(/^data:([A-Za-z-+/]+);base64,/, '');
+        buffer = Buffer.from(base64Data, 'base64');
+        originalFileName = req.body.fileName;
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: 'No file provided. Please attach a valid PDF document.',
+        });
+      }
+
+      // File size limit: 25MB
+      const MAX_SIZE = 25 * 1024 * 1024;
+      if (buffer.length > MAX_SIZE) {
+        return res.status(400).json({
+          success: false,
+          message: 'File size exceeds maximum permitted limit of 25MB.',
+        });
+      }
+
+      // Validate PDF format (header check and file extension)
+      const isPdfHeader = buffer.slice(0, 5).toString('ascii').startsWith('%PDF');
+      const hasPdfExt = originalFileName.toLowerCase().endsWith('.pdf');
+      if (!isPdfHeader && !hasPdfExt) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid file type. Only PDF documents (.pdf) are accepted.',
+        });
+      }
+
+      // Generate unique server filename
+      const ext = path.extname(originalFileName) || '.pdf';
+      const cleanBaseName = path.basename(originalFileName, ext).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 35);
+      const uniqueName = `${cleanBaseName || 'Assignment'}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}${ext}`;
+      const targetPath = path.join(UPLOADS_ROOT, category, uniqueName);
+
+      fs.writeFileSync(targetPath, buffer);
+
+      const sizeFormatted = buffer.length > 1024 * 1024
+        ? `${(buffer.length / (1024 * 1024)).toFixed(1)} MB`
+        : `${Math.round(buffer.length / 1024)} KB`;
+
+      const fileUrl = `/api/files/${category}/${uniqueName}`;
+
+      res.json({
+        success: true,
+        data: {
+          fileName: uniqueName,
+          originalName: originalFileName,
+          fileUrl,
+          fileSize: sizeFormatted,
+          bytes: buffer.length,
+        },
+      });
+    } catch (error: any) {
+      console.error('File upload processing error:', error);
+      res.status(500).json({ success: false, error: error.message });
     }
-
-    // Role checks
-    if ((category === 'assignments' || category === 'lab-materials') && auth.role === 'student') {
-      return res.status(403).json({ success: false, message: 'Access forbidden: Students cannot publish assignment sheets or lab materials.' });
-    }
-
-    // Decode base64 payload
-    const base64Data = fileBase64.replace(/^data:([A-Za-z-+/]+);base64,/, '');
-    const buffer = Buffer.from(base64Data, 'base64');
-
-    // File size limit: 15MB
-    const MAX_SIZE = 15 * 1024 * 1024;
-    if (buffer.length > MAX_SIZE) {
-      return res.status(400).json({ success: false, message: 'File exceeds maximum permitted size of 15MB' });
-    }
-
-    // Validate PDF magic header (%PDF-)
-    const isPdfHeader = buffer.slice(0, 5).toString('ascii').startsWith('%PDF');
-    if (!isPdfHeader && !fileName.toLowerCase().endsWith('.pdf')) {
-      return res.status(400).json({ success: false, message: 'Invalid file format: Only genuine PDF files are permitted.' });
-    }
-
-    // Generate unique server filename
-    const ext = path.extname(fileName) || '.pdf';
-    const cleanBaseName = path.basename(fileName, ext).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 35);
-    const uniqueName = `${cleanBaseName}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}${ext}`;
-    const targetPath = path.join(UPLOADS_ROOT, category, uniqueName);
-
-    fs.writeFileSync(targetPath, buffer);
-
-    const sizeFormatted = buffer.length > 1024 * 1024
-      ? `${(buffer.length / (1024 * 1024)).toFixed(1)} MB`
-      : `${Math.round(buffer.length / 1024)} KB`;
-
-    const fileUrl = `/api/files/${category}/${uniqueName}`;
-
-    res.json({
-      success: true,
-      data: {
-        fileName: uniqueName,
-        originalName: fileName,
-        fileUrl,
-        fileSize: sizeFormatted,
-        bytes: buffer.length,
-      },
-    });
-  } catch (error: any) {
-    console.error('File upload error:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
+  });
 });
 
 // 7. ASSIGNMENTS & SUBMISSIONS
 apiRouter.get('/assignments', (req, res) => {
   const assignments = queryAll('SELECT * FROM assignments ORDER BY due_date ASC');
-  res.json({ success: true, data: assignments });
+  const formatted = assignments.map((a: any) => ({
+    ...a,
+    subjectId: a.subject_id || a.subjectId,
+    subjectName: a.subject_name || a.subjectName,
+    teacherId: a.teacher_id || a.teacherId,
+    teacherName: a.teacher_name || a.teacherName,
+    fileUrl: a.file_url || a.fileUrl,
+    fileName: a.file_name || a.fileName,
+    fileSize: a.file_size || a.fileSize,
+    dueDate: a.due_date || a.dueDate,
+    maxMarks: a.max_marks ?? a.maxMarks ?? 10,
+    createdAt: a.created_at || a.createdAt,
+  }));
+  res.json({ success: true, data: formatted });
 });
 
 apiRouter.post('/assignments', (req, res) => {
@@ -729,7 +865,19 @@ apiRouter.get('/submissions', (req, res) => {
 
   sql += ' ORDER BY submitted_at DESC';
   const submissions = queryAll(sql, params);
-  res.json({ success: true, data: submissions });
+  const formatted = submissions.map((sub: any) => ({
+    ...sub,
+    assignmentId: sub.assignment_id || sub.assignmentId,
+    studentId: sub.student_id || sub.studentId,
+    studentName: sub.student_name || sub.studentName,
+    rollNumber: sub.roll_number || sub.rollNumber,
+    submittedAt: sub.submitted_at || sub.submittedAt,
+    fileUrl: sub.file_url || sub.fileUrl,
+    fileName: sub.file_name || sub.fileName,
+    fileSize: sub.file_size || sub.fileSize,
+    obtainedMarks: sub.obtained_marks ?? sub.obtainedMarks,
+  }));
+  res.json({ success: true, data: formatted });
 });
 
 apiRouter.post('/submissions', (req, res) => {

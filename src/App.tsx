@@ -90,11 +90,11 @@ export default function App() {
   // If currentUser exists, switch view to 'app'
   useEffect(() => {
     if (currentUser) {
-      setCurrentView('app');
-    } else if (currentView === 'app') {
-      setCurrentView('landing');
+      setCurrentView((prev) => (prev !== 'app' ? 'app' : prev));
+    } else {
+      setCurrentView((prev) => (prev === 'app' ? 'landing' : prev));
     }
-  }, [currentUser]);
+  }, [currentUser?.id]);
 
   // Only reset activeTab to 'dashboard' when the role ACTUALLY changes between different roles (not on initial mount/refresh)
   const prevRoleRef = useRef<Role | undefined>(currentUser?.role);
@@ -159,7 +159,7 @@ export default function App() {
         case 'dashboard':
           return <StudentDashboard onNavigateTab={handleSelectTab} onOpenPdf={handleOpenPdf} />;
         case 'subjects':
-          return <StudentSubjects onOpenPdf={handleOpenPdf} />;
+          return <StudentSubjects onNavigateTab={handleSelectTab} onOpenPdf={handleOpenPdf} />;
         case 'assignments':
           return <StudentAssignments onOpenPdf={handleOpenPdf} />;
         case 'marks':
@@ -182,7 +182,7 @@ export default function App() {
         case 'dashboard':
           return <TeacherDashboard onNavigateTab={handleSelectTab} onOpenPdf={handleOpenPdf} />;
         case 'my-subjects':
-          return <TeacherMySubjects onOpenPdf={handleOpenPdf} />;
+          return <TeacherMySubjects onNavigateTab={handleSelectTab} onOpenPdf={handleOpenPdf} />;
         case 'assignments':
           return <TeacherAssignments onOpenPdf={handleOpenPdf} />;
         case 'upload-materials':

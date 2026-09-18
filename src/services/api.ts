@@ -208,20 +208,42 @@ export const apiClient = {
     category: 'assignments' | 'lab-materials' | 'submissions',
     file: File | { fileName: string; fileBase64: string }
   ): Promise<{ fileName: string; originalName: string; fileUrl: string; fileSize: string }> {
+    if (file instanceof File) {
+      const formData = new FormData();
+      formData.append('category', category);
+      formData.append('file', file);
+
+      const headers: Record<string, string> = {};
+      const token = localStorage.getItem('academic_central_token');
+      const storedUserRaw = localStorage.getItem('academic_central_current_user');
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (storedUserRaw) {
+        try {
+          const u = JSON.parse(storedUserRaw);
+          if (u && u.id) headers['x-user-id'] = u.id;
+          if (u && u.role) headers['x-user-role'] = u.role;
+        } catch (_) {}
+      }
+
+      const res = await fetch(`${API_BASE}/files/upload`, {
+        method: 'POST',
+        headers,
+        body: formData,
+      });
+
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        throw new Error(json.message || 'Failed to upload PDF document to server.');
+      }
+      return json.data;
+    }
+
     let fileName = '';
     let fileBase64 = '';
 
     if ('fileName' in file && 'fileBase64' in file) {
       fileName = file.fileName;
       fileBase64 = file.fileBase64;
-    } else {
-      fileName = (file as File).name;
-      fileBase64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(file as File);
-      });
     }
 
     const res = await fetch(`${API_BASE}/files/upload`, {
