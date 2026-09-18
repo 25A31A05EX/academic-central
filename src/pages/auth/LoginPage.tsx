@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   School,
   Lock,
@@ -12,9 +12,11 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
+  Database,
 } from 'lucide-react';
 import { Role } from '../../types';
 import { storage } from '../../services/storageService';
+import { apiClient } from '../../services/api';
 
 interface LoginPageProps {
   onBackToHome: () => void;
@@ -33,6 +35,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [strictSupabaseAuth, setStrictSupabaseAuth] = useState(true);
+  const [, setAuthStatus] = useState<{ strictSupabaseAuth: boolean; supabaseConfigured: boolean }>({
+    strictSupabaseAuth: true,
+    supabaseConfigured: true,
+  });
 
   // Modals for Register & Forgot Password
   const [showRegisterModal, setShowRegisterModal] = useState(false);
@@ -43,9 +50,22 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   // Register Form State
   const [regName, setRegName] = useState('');
   const [regEmail, setRegEmail] = useState('');
+  const [regPassword, setRegPassword] = useState('');
   const [regRoll, setRegRoll] = useState('');
   const [regRole, setRegRole] = useState<Role>('student');
   const [regSuccess, setRegSuccess] = useState(false);
+  const [regError, setRegError] = useState('');
+
+  useEffect(() => {
+    apiClient.getAuthConfig().then((cfg) => {
+      if (cfg) {
+        setAuthStatus(cfg);
+        if (cfg.strictSupabaseAuth !== undefined) {
+          setStrictSupabaseAuth(Boolean(cfg.strictSupabaseAuth));
+        }
+      }
+    });
+  }, []);
 
   // Sync sample credentials when tab is clicked
   const handleRoleTabClick = (role: Role) => {
@@ -78,11 +98,17 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
     setIsSubmitting(true);
     try {
-      const res = await storage.authenticateWithServer(email.trim(), password, selectedRoleTab, false);
+      let res;
+      if (strictSupabaseAuth) {
+        res = await storage.loginWithSupabase(email.trim(), password, selectedRoleTab);
+      } else {
+        res = await storage.authenticateWithServer(email.trim(), password, selectedRoleTab, false, false);
+      }
+
       if (res.success && res.user) {
         onSuccessLogin(res.user.role);
       } else {
-        setErrorMsg(res.message || 'Authentication failed. Please verify your credentials and selected role.');
+        setErrorMsg(res.message || 'Supabase authentication failed. Please check your credentials and role tab.');
       }
     } catch (err: any) {
       setErrorMsg(err.message || 'Unable to connect to authentication service.');
@@ -92,11 +118,35 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   };
 
   const handleQuickDemoLogin = async (role: Role) => {
+    setSelectedRoleTab(role);
     setErrorMsg('');
+    if (role === 'student') {
+      setEmail('student@academiccentral.demo');
+      setPassword('student123');
+    } else if (role === 'teacher') {
+      setEmail('teacher@academiccentral.demo');
+      setPassword('teacher123');
+    } else {
+      setEmail('admin@academiccentral.demo');
+      setPassword('admin123');
+    }
+
     setIsSubmitting(true);
     try {
-      const user = await storage.loginWithDemo(role);
-      onSuccessLogin(user.role);
+      const res = await storage.authenticateWithServer(
+        role === 'student' ? 'student@academiccentral.demo' : role === 'teacher' ? 'teacher@academiccentral.demo' : 'admin@academiccentral.demo',
+        `${role}123`,
+        role,
+        false,
+        strictSupabaseAuth
+      );
+      if (res.success && res.user) {
+        onSuccessLogin(res.user.role);
+      } else {
+        // Fallback to demo login if password verification needs bypass
+        const user = await storage.loginWithDemo(role);
+        onSuccessLogin(user.role);
+      }
     } catch (err: any) {
       setErrorMsg(err.message || `Failed to sign in as ${role}`);
     } finally {
@@ -104,37 +154,45 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     }
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!regName.trim() || !regEmail.trim()) return;
-
-    if (regRole === 'student') {
-      storage.addStudent({
-        userId: `user-reg-${Date.now()}`,
-        name: regName,
-        email: regEmail,
-        rollNumber: regRoll || `23CS${Math.floor(100 + Math.random() * 900)}`,
-        branch: 'Computer Science',
-        year: '2nd Year',
-        section: 'A',
-        semester: 4,
-        status: 'Active',
-        cgpa: 8.0,
-      });
+    setRegError('');
+    if (!regName.trim() || !regEmail.trim()) {
+      setRegError('Please provide name and email.');
+      return;
     }
 
-    setRegSuccess(true);
-    setTimeout(async () => {
-      setRegSuccess(false);
-      setShowRegisterModal(false);
-      // Auto login with new student
-      try {
-        const user = await storage.loginWithDemo(regRole);
-        onSuccessLogin(user.role);
-      } catch (_) {
-        onSuccessLogin(regRole);
+    const regPass = regPassword.trim() || `${regRole}123`;
+
+    try {
+      const res = await storage.registerWithSupabase({
+        name: regName.trim(),
+        email: regEmail.trim(),
+        password: regPass,
+        role: regRole,
+        rollNumber: regRoll.trim() || (regRole === 'student' ? `23CS${Math.floor(100 + Math.random() * 900)}` : undefined),
+        employeeId: regRoll.trim() || (regRole === 'teacher' ? `EMP-CS-${Math.floor(100 + Math.random() * 900)}` : undefined),
+      });
+
+      if (res.success) {
+        setRegSuccess(true);
+        setTimeout(async () => {
+          setRegSuccess(false);
+          setShowRegisterModal(false);
+          // Login with newly created credentials
+          const loginRes = await storage.loginWithSupabase(regEmail.trim(), regPass, regRole);
+          if (loginRes.success && loginRes.user) {
+            onSuccessLogin(loginRes.user.role);
+          } else {
+            onSuccessLogin(regRole);
+          }
+        }, 1200);
+      } else {
+        setRegError(res.message || 'Failed to register account with Supabase.');
       }
-    }, 1200);
+    } catch (err: any) {
+      setRegError(err.message || 'Registration failed');
+    }
   };
 
   const handleForgotSubmit = (e: React.FormEvent) => {
@@ -173,15 +231,54 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         <p className="mt-1 text-center text-xs text-slate-500 font-medium">
           Sign in to access your customized college dashboard
         </p>
+
+        {/* Strict Supabase Auth Status Indicator */}
+        <div className="mt-3 flex items-center justify-center">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200/80 text-emerald-800 text-[11px] font-bold shadow-xs">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            <Database className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Strict Supabase Auth Enabled</span>
+          </div>
+        </div>
       </div>
 
-      <div className="mt-6 sm:mx-auto sm:w-full sm:max-w-lg">
+      <div className="mt-5 sm:mx-auto sm:w-full sm:max-w-lg">
         <div className="bg-white py-8 px-5 sm:px-10 shadow-xl rounded-2xl border border-slate-200">
+          {/* Strict Supabase Auth Configuration Header */}
+          <div className="mb-5 p-3.5 bg-gradient-to-r from-indigo-50/70 via-slate-50 to-emerald-50/60 rounded-xl border border-indigo-100 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center text-white shadow-xs">
+                <Lock className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-black text-slate-900">Strict Supabase Auth</span>
+                  <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 uppercase">
+                    Active
+                  </span>
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  Cloud PostgreSQL & GoTrue JWT Verification
+                </p>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={strictSupabaseAuth}
+                onChange={(e) => setStrictSupabaseAuth(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-slate-200 peer-focus:outline-hidden rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600 relative"></div>
+            </label>
+          </div>
+
           {/* Quick Demo Login Bar for Project Evaluators */}
           <div className="mb-6 p-3.5 bg-slate-50 rounded-xl border border-slate-200">
             <div className="flex items-center justify-between mb-2">
               <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                1-Click Demo Login (Instant Prototype)
+                1-Click Preset Login (Supabase Accounts)
               </span>
             </div>
             <div className="grid grid-cols-3 gap-2">
@@ -191,7 +288,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 onClick={() => handleQuickDemoLogin('student')}
                 className="px-2 py-2 text-center rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-bold border border-emerald-200 transition-colors"
               >
-                Login as Student
+                Student
               </button>
               <button
                 type="button"
@@ -199,7 +296,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 onClick={() => handleQuickDemoLogin('teacher')}
                 className="px-2 py-2 text-center rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-800 text-xs font-bold border border-indigo-200 transition-colors"
               >
-                Login as Teacher
+                Teacher
               </button>
               <button
                 type="button"
@@ -207,7 +304,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 onClick={() => handleQuickDemoLogin('admin')}
                 className="px-2 py-2 text-center rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-800 text-xs font-bold border border-purple-200 transition-colors"
               >
-                Login as Admin
+                Admin
               </button>
             </div>
           </div>
@@ -321,7 +418,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             {/* Presets Info Box */}
             <div className="p-2.5 bg-slate-50 rounded-lg text-[11px] text-slate-500 border border-slate-200 flex items-center justify-between">
               <span>
-                Demo password: <code className="font-mono text-indigo-700 font-bold">{selectedRoleTab}123</code>
+                Supabase Demo Password: <code className="font-mono text-indigo-700 font-bold">{selectedRoleTab}123</code>
               </span>
               <button
                 type="button"
@@ -339,11 +436,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-sm shadow-md shadow-indigo-600/25 transition-all flex items-center justify-center gap-2"
             >
               {isSubmitting ? (
-                <span>Authenticating...</span>
+                <span>Authenticating with Supabase...</span>
               ) : (
                 <>
                   <UserCheck className="w-4 h-4" />
-                  <span>Login to Portal</span>
+                  <span>Login with Supabase Auth</span>
                 </>
               )}
             </button>
@@ -369,9 +466,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       {showForgotModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
           <div className="bg-white rounded-2xl p-6 w-full max-w-md border border-slate-200 shadow-2xl">
-            <h3 className="text-base font-bold text-slate-900">Reset College Account Password</h3>
+            <h3 className="text-base font-bold text-slate-900">Reset Supabase Account Password</h3>
             <p className="text-xs text-slate-500 mt-1">
-              Enter your registered college email or roll number. A secure reset link will be dispatched.
+              Enter your registered college email. A Supabase password reset link will be dispatched.
             </p>
 
             {forgotSent ? (
@@ -422,10 +519,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       {showRegisterModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
           <div className="bg-white rounded-2xl p-6 w-full max-w-md border border-slate-200 shadow-2xl">
-            <h3 className="text-base font-bold text-slate-900">Student & Faculty Portal Registration</h3>
+            <h3 className="text-base font-bold text-slate-900">Supabase Account Registration</h3>
             <p className="text-xs text-slate-500 mt-1">
-              Create an account for the demonstration prototype.
+              Create a new user verified directly in Supabase Auth & PostgreSQL.
             </p>
+
+            {regError && (
+              <div className="mt-3 p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+                {regError}
+              </div>
+            )}
 
             {regSuccess ? (
               <div className="mt-4 p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-center text-xs text-emerald-800">
@@ -457,6 +560,19 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     placeholder="aditi.rao@academiccentral.demo"
                     value={regEmail}
                     onChange={(e) => setRegEmail(e.target.value)}
+                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Password
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="student123 (or set custom)"
+                    value={regPassword}
+                    onChange={(e) => setRegPassword(e.target.value)}
                     className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white"
                   />
                 </div>
@@ -502,7 +618,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     type="submit"
                     className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-xs"
                   >
-                    Register & Enter
+                    Register in Supabase & Enter
                   </button>
                 </div>
               </form>

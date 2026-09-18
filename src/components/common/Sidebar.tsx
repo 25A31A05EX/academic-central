@@ -44,6 +44,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   // Navigation definitions based on user role
   const studentNav = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { id: 'academic-history', label: 'Academic History', icon: History },
     { id: 'subjects', label: 'Subjects', icon: BookOpen },
     { id: 'assignments', label: 'Assignments', icon: FileCheck2 },
     { id: 'marks', label: 'Marks', icon: Award },
@@ -66,6 +67,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const adminNav = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { id: 'semester-results', label: 'Semester Results', icon: Award },
     { id: 'students', label: 'Students', icon: GraduationCap },
     { id: 'teachers', label: 'Teachers', icon: Users },
     { id: 'subjects', label: 'Subjects', icon: BookOpen },

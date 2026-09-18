@@ -194,6 +194,8 @@ export interface SubjectGrade {
   grade: string;
   credits: number;
   points: number;
+  marks?: number;
+  maxMarks?: number;
 }
 
 export interface SemesterResult {

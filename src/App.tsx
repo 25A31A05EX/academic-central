@@ -14,6 +14,7 @@ import { LoginPage } from './pages/auth/LoginPage';
 
 // Student Pages
 import { StudentDashboard } from './pages/student/StudentDashboard';
+import { StudentAcademicHistory } from './pages/student/StudentAcademicHistory';
 import { StudentSubjects } from './pages/student/StudentSubjects';
 import { StudentAssignments } from './pages/student/StudentAssignments';
 import { StudentMarks } from './pages/student/StudentMarks';
@@ -34,6 +35,7 @@ import { TeacherProfile } from './pages/teacher/TeacherProfile';
 
 // Admin Pages
 import { AdminDashboard } from './pages/admin/AdminDashboard';
+import { AdminSemesterResults } from './pages/admin/AdminSemesterResults';
 import { AdminStudents } from './pages/admin/AdminStudents';
 import { AdminTeachers } from './pages/admin/AdminTeachers';
 import { AdminSubjects } from './pages/admin/AdminSubjects';
@@ -158,6 +160,8 @@ export default function App() {
       switch (activeTab) {
         case 'dashboard':
           return <StudentDashboard onNavigateTab={handleSelectTab} onOpenPdf={handleOpenPdf} />;
+        case 'academic-history':
+          return <StudentAcademicHistory />;
         case 'subjects':
           return <StudentSubjects onNavigateTab={handleSelectTab} onOpenPdf={handleOpenPdf} />;
         case 'assignments':
@@ -204,6 +208,8 @@ export default function App() {
       switch (activeTab) {
         case 'dashboard':
           return <AdminDashboard onNavigateTab={handleSelectTab} />;
+        case 'semester-results':
+          return <AdminSemesterResults />;
         case 'students':
           return <AdminStudents />;
         case 'teachers':

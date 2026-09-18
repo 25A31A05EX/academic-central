@@ -12,6 +12,7 @@ import {
   NotificationItem,
   AuditLogItem,
   SemesterResult,
+  SubjectGrade,
   Role,
 } from '../types';
 import {
@@ -116,10 +117,11 @@ class AcademicStore {
     identifier: string,
     password?: string,
     role?: Role,
-    isDemoLogin?: boolean
+    isDemoLogin?: boolean,
+    strictSupabaseAuth: boolean = true
   ): Promise<{ success: boolean; user?: User; message?: string }> {
     try {
-      const response = await apiClient.login(identifier, password, role, isDemoLogin);
+      const response = await apiClient.login(identifier, password, role, isDemoLogin, strictSupabaseAuth);
       if (response && response.user) {
         this.setCurrentUser(response.user);
         return { success: true, user: response.user };
@@ -127,6 +129,44 @@ class AcademicStore {
       return { success: false, message: response?.message || 'Authentication failed' };
     } catch (err: any) {
       return { success: false, message: err.message || 'Login request failed' };
+    }
+  }
+
+  async loginWithSupabase(
+    identifier: string,
+    pass: string,
+    role?: Role
+  ): Promise<{ success: boolean; user?: User; message?: string }> {
+    try {
+      const response = await apiClient.supabaseLogin(identifier, pass, role);
+      if (response && response.user) {
+        this.setCurrentUser(response.user);
+        return { success: true, user: response.user };
+      }
+      return { success: false, message: response?.message || 'Supabase authentication failed' };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Supabase authentication failed' };
+    }
+  }
+
+  async registerWithSupabase(payload: {
+    name: string;
+    email: string;
+    password?: string;
+    role: Role;
+    rollNumber?: string;
+    employeeId?: string;
+    branch?: string;
+    year?: string;
+    section?: string;
+    semester?: number;
+    department?: string;
+  }): Promise<{ success: boolean; user?: any; message: string }> {
+    try {
+      const res = await apiClient.supabaseRegister(payload);
+      return res;
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Supabase registration failed' };
     }
   }
 
@@ -981,11 +1021,151 @@ class AcademicStore {
     return all.filter((r) => r.studentId === studentId);
   }
 
-  addSemesterResult(result: SemesterResult): void {
+  getStudentSemesterResults(studentId: string): SemesterResult[] {
+    return this.getSemesterResults(studentId);
+  }
+
+  addSemesterResult(result: Partial<SemesterResult> & { studentId: string; semester: number; subjects: SubjectGrade[] }): SemesterResult {
     const list = this.getSemesterResults();
-    const updated = [...list, result];
+    const semNum = Number(result.semester) || 1;
+
+    // Calculate credits & SGPA
+    let totalCredits = 0;
+    let earnedCredits = 0;
+    let totalPoints = 0;
+    result.subjects.forEach((sub) => {
+      const cr = Number(sub.credits) || 0;
+      const pts = Number(sub.points) || 0;
+      totalCredits += cr;
+      if (sub.grade !== 'F') earnedCredits += cr;
+      totalPoints += cr * pts;
+    });
+
+    const calculatedSgpa = totalCredits > 0 ? Number((totalPoints / totalCredits).toFixed(2)) : 8.0;
+    const finalSgpa = result.sgpa !== undefined ? Number(result.sgpa) : calculatedSgpa;
+
+    const newResult: SemesterResult = {
+      id: result.id || `res-${Date.now()}-${result.studentId}`,
+      studentId: result.studentId,
+      semester: semNum,
+      academicYear: result.academicYear || '2025-2026',
+      sgpa: finalSgpa,
+      creditsRegistered: result.creditsRegistered !== undefined ? Number(result.creditsRegistered) : totalCredits,
+      creditsEarned: result.creditsEarned !== undefined ? Number(result.creditsEarned) : earnedCredits,
+      resultStatus: result.resultStatus || (result.subjects.some((s) => s.grade === 'F') ? 'Fail' : 'Pass'),
+      subjects: result.subjects,
+      publishedDate: result.publishedDate || new Date().toISOString().split('T')[0],
+    };
+
+    // If result for student + sem exists, replace it, else push
+    const existingIndex = list.findIndex((r) => r.studentId === result.studentId && r.semester === semNum);
+    let updated: SemesterResult[];
+    if (existingIndex >= 0) {
+      updated = [...list];
+      updated[existingIndex] = newResult;
+    } else {
+      updated = [...list, newResult];
+    }
     setStored(STORAGE_KEYS.SEMESTER_RESULTS, updated);
+
+    // Update student CGPA
+    this.recalculateStudentCgpa(result.studentId);
+
+    // Send to server in background
+    apiClient.addSemesterResult(newResult).catch((err) => {
+      console.warn('Deferred server sync for addSemesterResult:', err);
+    });
+
+    const user = this.getCurrentUser();
+    this.addAuditLog(
+      user ? user.id : 'admin-1',
+      user ? user.name : 'Admin',
+      'admin',
+      'Semester Result Published',
+      `Published Semester ${semNum} result (SGPA: ${finalSgpa}) for student ${result.studentId}.`
+    );
+
     notify();
+    return newResult;
+  }
+
+  updateSemesterResult(id: string, updates: Partial<SemesterResult>): void {
+    const list = this.getSemesterResults();
+    const existing = list.find((r) => r.id === id);
+    if (!existing) return;
+
+    const subjects = updates.subjects !== undefined ? updates.subjects : existing.subjects;
+    let totalCredits = 0;
+    let earnedCredits = 0;
+    let totalPoints = 0;
+    subjects.forEach((sub) => {
+      const cr = Number(sub.credits) || 0;
+      const pts = Number(sub.points) || 0;
+      totalCredits += cr;
+      if (sub.grade !== 'F') earnedCredits += cr;
+      totalPoints += cr * pts;
+    });
+
+    const calculatedSgpa = totalCredits > 0 ? Number((totalPoints / totalCredits).toFixed(2)) : existing.sgpa;
+    const finalSgpa = updates.sgpa !== undefined ? Number(updates.sgpa) : calculatedSgpa;
+
+    const updatedResult: SemesterResult = {
+      ...existing,
+      ...updates,
+      subjects,
+      sgpa: finalSgpa,
+      creditsRegistered: updates.creditsRegistered !== undefined ? Number(updates.creditsRegistered) : (totalCredits > 0 ? totalCredits : existing.creditsRegistered),
+      creditsEarned: updates.creditsEarned !== undefined ? Number(updates.creditsEarned) : (earnedCredits > 0 ? earnedCredits : existing.creditsEarned),
+    };
+
+    const updated = list.map((r) => (r.id === id ? updatedResult : r));
+    setStored(STORAGE_KEYS.SEMESTER_RESULTS, updated);
+
+    this.recalculateStudentCgpa(existing.studentId);
+
+    apiClient.updateSemesterResult(id, updatedResult).catch((err) => {
+      console.warn('Deferred server sync for updateSemesterResult:', err);
+    });
+
+    notify();
+  }
+
+  deleteSemesterResult(id: string): void {
+    const list = this.getSemesterResults();
+    const existing = list.find((r) => r.id === id);
+    const updated = list.filter((r) => r.id !== id);
+    setStored(STORAGE_KEYS.SEMESTER_RESULTS, updated);
+
+    if (existing) {
+      this.recalculateStudentCgpa(existing.studentId);
+    }
+
+    apiClient.deleteSemesterResult(id).catch((err) => {
+      console.warn('Deferred server sync for deleteSemesterResult:', err);
+    });
+
+    notify();
+  }
+
+  private recalculateStudentCgpa(studentId: string): void {
+    const results = this.getSemesterResults(studentId);
+    if (results.length === 0) return;
+
+    let cumulativeCredits = 0;
+    let cumulativeWeighted = 0;
+    results.forEach((r) => {
+      const cr = Number(r.creditsRegistered) || 20;
+      cumulativeCredits += cr;
+      cumulativeWeighted += (Number(r.sgpa) || 0) * cr;
+    });
+
+    const newCgpa = cumulativeCredits > 0 ? Number((cumulativeWeighted / cumulativeCredits).toFixed(2)) : 8.0;
+    const students = this.getStudents();
+    const studIndex = students.findIndex((s) => s.id === studentId);
+    if (studIndex >= 0) {
+      students[studIndex] = { ...students[studIndex], cgpa: newCgpa };
+      setStored(STORAGE_KEYS.STUDENTS, students);
+    }
   }
 
   // Sync with persistent SQLite server database

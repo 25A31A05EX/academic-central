@@ -3,6 +3,16 @@ import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
 import { queryAll, queryOne, runQuery, getDb, saveDb } from './db.js';
+import {
+  getSupabaseCredentials,
+  isSupabaseConfigured,
+  testSupabaseConnection,
+  getSupabasePostgresSchema,
+  syncLocalDataToSupabase,
+  initPostgresTables,
+  authenticateWithSupabase,
+  registerWithSupabase,
+} from './supabase.js';
 
 export const apiRouter = express.Router();
 
@@ -61,8 +71,16 @@ apiRouter.get('/bootstrap', async (req, res) => {
 
     // Parse JSON fields where appropriate
     const formattedSemesterResults = semesterResults.map((r: any) => ({
-      ...r,
-      subjects: typeof r.subjects_json === 'string' ? JSON.parse(r.subjects_json) : r.subjects_json,
+      id: r.id,
+      studentId: r.student_id || r.studentId,
+      semester: Number(r.semester),
+      academicYear: r.academic_year || r.academicYear,
+      sgpa: Number(r.sgpa),
+      creditsRegistered: r.credits_registered ?? r.creditsRegistered ?? 0,
+      creditsEarned: r.credits_earned ?? r.creditsEarned ?? 0,
+      resultStatus: r.result_status || r.resultStatus || 'Pass',
+      publishedDate: r.published_date || r.publishedDate || '',
+      subjects: typeof r.subjects_json === 'string' ? JSON.parse(r.subjects_json) : (r.subjects || []),
     }));
 
     // Format collections to camelCase
@@ -186,6 +204,7 @@ const activeSessions = new Map<string, {
   email: string;
   name: string;
   expiresAt: number;
+  authProvider?: string;
 }>();
 
 // Helper to extract authenticated user from request
@@ -217,13 +236,151 @@ function getAuthUser(req: express.Request): { userId: string | null; role: strin
 }
 
 // 2. AUTHENTICATION ENDPOINTS
+apiRouter.get('/auth/config', (req, res) => {
+  const isSupaConfigured = isSupabaseConfigured();
+  res.json({
+    success: true,
+    strictSupabaseAuth: true,
+    supabaseConfigured: isSupaConfigured,
+    provider: isSupaConfigured ? 'supabase' : 'hybrid',
+    authDatabase: 'PostgreSQL @ db.fuzfgpkrhhcsrybejbwf.supabase.co',
+  });
+});
+
+apiRouter.post('/auth/supabase-login', async (req, res) => {
+  try {
+    const { identifier, email, password, role } = req.body;
+    const lookupInput = (identifier || email || '').trim();
+    const inputPass = (password || '').trim();
+
+    if (!lookupInput || !inputPass) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email, roll number, or employee ID and password are required for Supabase authentication.',
+      });
+    }
+
+    const authRes = await authenticateWithSupabase(lookupInput, inputPass, role);
+    if (!authRes.success || !authRes.user) {
+      return res.status(401).json({
+        success: false,
+        message: authRes.message || 'Supabase authentication failed.',
+      });
+    }
+
+    // Register active session
+    const token = authRes.token || `sb_jwt_${authRes.user.id}_${Date.now()}`;
+    activeSessions.set(token, {
+      userId: authRes.user.id,
+      role: authRes.user.role,
+      email: authRes.user.email,
+      name: authRes.user.name,
+      authProvider: 'supabase',
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    });
+
+    logAudit(
+      authRes.user.id,
+      authRes.user.name,
+      authRes.user.role,
+      'Supabase Auth Sign In',
+      `${authRes.user.name} authenticated strictly via Supabase Cloud Auth as ${authRes.user.role.toUpperCase()}`
+    );
+
+    res.json({
+      success: true,
+      token,
+      user: authRes.user,
+      supabaseSession: authRes.supabaseSession,
+      message: 'Authenticated strictly with Supabase Cloud Auth',
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/auth/supabase-register', async (req, res) => {
+  try {
+    const { name, email, password, role, rollNumber, employeeId, branch, year, section, semester, department } = req.body;
+    if (!name || !email || !role) {
+      return res.status(400).json({ success: false, message: 'Name, email, and role are required.' });
+    }
+
+    const regRes = await registerWithSupabase({
+      name,
+      email,
+      password,
+      role,
+      rollNumber,
+      employeeId,
+      branch,
+      year,
+      section,
+      semester,
+      department,
+    });
+
+    if (!regRes.success) {
+      return res.status(400).json(regRes);
+    }
+
+    logAudit(
+      regRes.user.id,
+      name,
+      role,
+      'Supabase User Registration',
+      `Registered new ${role.toUpperCase()} account in Supabase database: ${name} (${email})`
+    );
+
+    res.json(regRes);
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 apiRouter.post('/auth/login', async (req, res) => {
   try {
-    const { identifier, email, password, role, isDemoLogin } = req.body;
+    const { identifier, email, password, role, isDemoLogin, strictSupabaseAuth } = req.body;
     await getDb();
 
     const lookupInput = (identifier || email || '').trim();
     const inputPass = (password || '').trim();
+
+    // If strict Supabase auth is requested (and not demo bypass), route to Supabase auth engine
+    if (!isDemoLogin && (strictSupabaseAuth || isSupabaseConfigured())) {
+      const supaAuth = await authenticateWithSupabase(lookupInput, inputPass, role);
+      if (supaAuth.success && supaAuth.user) {
+        const token = supaAuth.token || `sb_jwt_${supaAuth.user.id}_${Date.now()}`;
+        activeSessions.set(token, {
+          userId: supaAuth.user.id,
+          role: supaAuth.user.role,
+          email: supaAuth.user.email,
+          name: supaAuth.user.name,
+          authProvider: 'supabase',
+          expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        });
+
+        logAudit(
+          supaAuth.user.id,
+          supaAuth.user.name,
+          supaAuth.user.role,
+          'User Sign In (Supabase)',
+          `${supaAuth.user.name} authenticated into Academic Central via Supabase as ${supaAuth.user.role.toUpperCase()}`
+        );
+
+        return res.json({
+          success: true,
+          token,
+          user: supaAuth.user,
+          supabaseSession: supaAuth.supabaseSession,
+        });
+      } else if (strictSupabaseAuth) {
+        return res.status(401).json({
+          success: false,
+          message: supaAuth.message || 'Supabase authentication failed. Please verify credentials.',
+        });
+      }
+    }
 
     let user: any = null;
 
@@ -474,15 +631,296 @@ apiRouter.delete('/students/:id', (req, res) => {
   }
 });
 
-// SEMESTER RESULTS FOR STUDENT
+// SEMESTER RESULTS (Academic History / Transcripts)
+apiRouter.get('/semester-results', (req, res) => {
+  try {
+    const { studentId } = req.query;
+    const auth = getAuthUser(req);
+    let results: any[];
+
+    if (auth.role === 'student') {
+      const student = queryOne('SELECT * FROM students WHERE user_id = ?', [auth.userId]);
+      const targetStudentId = student ? student.id : (studentId as string);
+      results = queryAll('SELECT * FROM semester_results WHERE student_id = ? ORDER BY semester ASC', [targetStudentId]);
+    } else if (studentId) {
+      results = queryAll('SELECT * FROM semester_results WHERE student_id = ? ORDER BY semester ASC', [studentId as string]);
+    } else {
+      results = queryAll('SELECT * FROM semester_results ORDER BY semester ASC');
+    }
+
+    const formatted = results.map((r: any) => ({
+      id: r.id,
+      studentId: r.student_id || r.studentId,
+      semester: Number(r.semester),
+      academicYear: r.academic_year || r.academicYear,
+      sgpa: Number(r.sgpa),
+      creditsRegistered: r.credits_registered ?? r.creditsRegistered ?? 0,
+      creditsEarned: r.credits_earned ?? r.creditsEarned ?? 0,
+      resultStatus: r.result_status || r.resultStatus || 'Pass',
+      publishedDate: r.published_date || r.publishedDate || '',
+      subjects: typeof r.subjects_json === 'string' ? JSON.parse(r.subjects_json) : (r.subjects || []),
+    }));
+
+    res.json({ success: true, data: formatted });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 apiRouter.get('/students/:id/semester-results', (req, res) => {
-  const { id } = req.params;
-  const results = queryAll('SELECT * FROM semester_results WHERE student_id = ? ORDER BY semester ASC', [id]);
-  const formatted = results.map((r: any) => ({
-    ...r,
-    subjects: typeof r.subjects_json === 'string' ? JSON.parse(r.subjects_json) : r.subjects_json,
-  }));
-  res.json({ success: true, data: formatted });
+  try {
+    const { id } = req.params;
+    const results = queryAll('SELECT * FROM semester_results WHERE student_id = ? ORDER BY semester ASC', [id]);
+    const formatted = results.map((r: any) => ({
+      id: r.id,
+      studentId: r.student_id || r.studentId,
+      semester: Number(r.semester),
+      academicYear: r.academic_year || r.academicYear,
+      sgpa: Number(r.sgpa),
+      creditsRegistered: r.credits_registered ?? r.creditsRegistered ?? 0,
+      creditsEarned: r.credits_earned ?? r.creditsEarned ?? 0,
+      resultStatus: r.result_status || r.resultStatus || 'Pass',
+      publishedDate: r.published_date || r.publishedDate || '',
+      subjects: typeof r.subjects_json === 'string' ? JSON.parse(r.subjects_json) : (r.subjects || []),
+    }));
+    res.json({ success: true, data: formatted });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+apiRouter.post('/semester-results', (req, res) => {
+  try {
+    const auth = getAuthUser(req);
+    if (auth.role && auth.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Access forbidden: Only administrators can create or publish semester results.' });
+    }
+
+    const {
+      id,
+      studentId,
+      semester,
+      academicYear,
+      sgpa,
+      creditsRegistered,
+      creditsEarned,
+      resultStatus,
+      subjects,
+      publishedDate,
+    } = req.body;
+
+    if (!studentId) {
+      return res.status(400).json({ success: false, message: 'studentId is required' });
+    }
+
+    const resultId = id || `res-${Date.now()}-${studentId}`;
+    const semNum = Number(semester) || 1;
+    const subjectsArray = Array.isArray(subjects) ? subjects : [];
+
+    let totalCredits = 0;
+    let earnedCredits = 0;
+    let totalPoints = 0;
+    subjectsArray.forEach((sub: any) => {
+      const cr = Number(sub.credits) || 0;
+      const pts = Number(sub.points) || 0;
+      totalCredits += cr;
+      if (sub.grade !== 'F') {
+        earnedCredits += cr;
+      }
+      totalPoints += cr * pts;
+    });
+
+    const calculatedSgpa = totalCredits > 0 ? Number((totalPoints / totalCredits).toFixed(2)) : (Number(sgpa) || 8.0);
+    const finalSgpa = sgpa !== undefined && sgpa !== null && !isNaN(Number(sgpa)) ? Number(sgpa) : calculatedSgpa;
+    const finalCreditsReg = creditsRegistered !== undefined ? Number(creditsRegistered) : totalCredits;
+    const finalCreditsEarned = creditsEarned !== undefined ? Number(creditsEarned) : earnedCredits;
+    const finalStatus = resultStatus || (subjectsArray.some((s: any) => s.grade === 'F') ? 'Fail' : 'Pass');
+    const finalPubDate = publishedDate || new Date().toISOString().split('T')[0];
+
+    const existing = queryOne('SELECT * FROM semester_results WHERE student_id = ? AND semester = ?', [studentId, semNum]);
+    if (existing) {
+      runQuery(
+        `UPDATE semester_results
+         SET academic_year = ?, sgpa = ?, credits_registered = ?, credits_earned = ?, result_status = ?, subjects_json = ?, published_date = ?
+         WHERE id = ?`,
+        [academicYear || '2025-2026', finalSgpa, finalCreditsReg, finalCreditsEarned, finalStatus, JSON.stringify(subjectsArray), finalPubDate, existing.id]
+      );
+    } else {
+      runQuery(
+        `INSERT INTO semester_results (id, student_id, semester, academic_year, sgpa, credits_registered, credits_earned, result_status, subjects_json, published_date)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [resultId, studentId, semNum, academicYear || '2025-2026', finalSgpa, finalCreditsReg, finalCreditsEarned, finalStatus, JSON.stringify(subjectsArray), finalPubDate]
+      );
+    }
+
+    // Recalculate CGPA for the student
+    const allStudentSemesters = queryAll('SELECT * FROM semester_results WHERE student_id = ?', [studentId]);
+    if (allStudentSemesters.length > 0) {
+      let cumulativeCredits = 0;
+      let cumulativeWeightedSgpa = 0;
+      allStudentSemesters.forEach((s: any) => {
+        const cr = Number(s.credits_registered) || 20;
+        const sg = Number(s.sgpa) || 0;
+        cumulativeCredits += cr;
+        cumulativeWeightedSgpa += sg * cr;
+      });
+      const newCgpa = cumulativeCredits > 0 ? Number((cumulativeWeightedSgpa / cumulativeCredits).toFixed(2)) : 8.0;
+      runQuery('UPDATE students SET cgpa = ? WHERE id = ?', [newCgpa, studentId]);
+    }
+
+    const studentInfo = queryOne('SELECT name FROM students WHERE id = ?', [studentId]);
+    logAudit(auth.userId, auth.name || 'Admin', 'admin', 'Semester Result Published', `Published Semester ${semNum} result for ${studentInfo?.name || studentId} (SGPA: ${finalSgpa})`);
+
+    res.json({
+      success: true,
+      data: {
+        id: existing ? existing.id : resultId,
+        studentId,
+        semester: semNum,
+        academicYear: academicYear || '2025-2026',
+        sgpa: finalSgpa,
+        creditsRegistered: finalCreditsReg,
+        creditsEarned: finalCreditsEarned,
+        resultStatus: finalStatus,
+        subjects: subjectsArray,
+        publishedDate: finalPubDate,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+apiRouter.put('/semester-results/:id', (req, res) => {
+  try {
+    const auth = getAuthUser(req);
+    if (auth.role && auth.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Access forbidden: Only administrators can modify semester results.' });
+    }
+
+    const { id } = req.params;
+    const existing = queryOne('SELECT * FROM semester_results WHERE id = ?', [id]);
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Semester result not found' });
+    }
+
+    const {
+      semester,
+      academicYear,
+      sgpa,
+      creditsRegistered,
+      creditsEarned,
+      resultStatus,
+      subjects,
+      publishedDate,
+    } = req.body;
+
+    const subjectsArray = subjects !== undefined ? (Array.isArray(subjects) ? subjects : []) : (typeof existing.subjects_json === 'string' ? JSON.parse(existing.subjects_json) : []);
+
+    let totalCredits = 0;
+    let earnedCredits = 0;
+    let totalPoints = 0;
+    subjectsArray.forEach((sub: any) => {
+      const cr = Number(sub.credits) || 0;
+      const pts = Number(sub.points) || 0;
+      totalCredits += cr;
+      if (sub.grade !== 'F') {
+        earnedCredits += cr;
+      }
+      totalPoints += cr * pts;
+    });
+
+    const calculatedSgpa = totalCredits > 0 ? Number((totalPoints / totalCredits).toFixed(2)) : (Number(sgpa) || Number(existing.sgpa));
+    const finalSgpa = sgpa !== undefined ? Number(sgpa) : calculatedSgpa;
+    const finalCreditsReg = creditsRegistered !== undefined ? Number(creditsRegistered) : (totalCredits > 0 ? totalCredits : existing.credits_registered);
+    const finalCreditsEarned = creditsEarned !== undefined ? Number(creditsEarned) : (earnedCredits > 0 ? earnedCredits : existing.credits_earned);
+    const finalStatus = resultStatus || existing.result_status;
+    const finalPubDate = publishedDate || existing.published_date;
+    const finalSem = semester !== undefined ? Number(semester) : existing.semester;
+    const finalYear = academicYear || existing.academic_year;
+
+    runQuery(
+      `UPDATE semester_results
+       SET semester = ?, academic_year = ?, sgpa = ?, credits_registered = ?, credits_earned = ?, result_status = ?, subjects_json = ?, published_date = ?
+       WHERE id = ?`,
+      [finalSem, finalYear, finalSgpa, finalCreditsReg, finalCreditsEarned, finalStatus, JSON.stringify(subjectsArray), finalPubDate, id]
+    );
+
+    // Recalculate student CGPA
+    const studentId = existing.student_id;
+    const allStudentSemesters = queryAll('SELECT * FROM semester_results WHERE student_id = ?', [studentId]);
+    if (allStudentSemesters.length > 0) {
+      let cumulativeCredits = 0;
+      let cumulativeWeightedSgpa = 0;
+      allStudentSemesters.forEach((s: any) => {
+        const cr = Number(s.credits_registered) || 20;
+        const sg = Number(s.sgpa) || 0;
+        cumulativeCredits += cr;
+        cumulativeWeightedSgpa += sg * cr;
+      });
+      const newCgpa = cumulativeCredits > 0 ? Number((cumulativeWeightedSgpa / cumulativeCredits).toFixed(2)) : 8.0;
+      runQuery('UPDATE students SET cgpa = ? WHERE id = ?', [newCgpa, studentId]);
+    }
+
+    const studentInfo = queryOne('SELECT name FROM students WHERE id = ?', [studentId]);
+    logAudit(auth.userId, auth.name || 'Admin', 'admin', 'Semester Result Modified', `Updated Semester ${finalSem} marks for ${studentInfo?.name || studentId}`);
+
+    res.json({
+      success: true,
+      data: {
+        id,
+        studentId,
+        semester: finalSem,
+        academicYear: finalYear,
+        sgpa: finalSgpa,
+        creditsRegistered: finalCreditsReg,
+        creditsEarned: finalCreditsEarned,
+        resultStatus: finalStatus,
+        subjects: subjectsArray,
+        publishedDate: finalPubDate,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+apiRouter.delete('/semester-results/:id', (req, res) => {
+  try {
+    const auth = getAuthUser(req);
+    if (auth.role && auth.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Access forbidden: Only administrators can delete semester results.' });
+    }
+
+    const { id } = req.params;
+    const existing = queryOne('SELECT * FROM semester_results WHERE id = ?', [id]);
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Semester result not found' });
+    }
+
+    const studentId = existing.student_id;
+    runQuery('DELETE FROM semester_results WHERE id = ?', [id]);
+
+    // Recalculate CGPA
+    const allStudentSemesters = queryAll('SELECT * FROM semester_results WHERE student_id = ?', [studentId]);
+    if (allStudentSemesters.length > 0) {
+      let cumulativeCredits = 0;
+      let cumulativeWeightedSgpa = 0;
+      allStudentSemesters.forEach((s: any) => {
+        const cr = Number(s.credits_registered) || 20;
+        const sg = Number(s.sgpa) || 0;
+        cumulativeCredits += cr;
+        cumulativeWeightedSgpa += sg * cr;
+      });
+      const newCgpa = cumulativeCredits > 0 ? Number((cumulativeWeightedSgpa / cumulativeCredits).toFixed(2)) : 8.0;
+      runQuery('UPDATE students SET cgpa = ? WHERE id = ?', [newCgpa, studentId]);
+    }
+
+    logAudit(auth.userId, auth.name || 'Admin', 'admin', 'Semester Result Deleted', `Deleted Semester ${existing.semester} result record`);
+    res.json({ success: true, message: 'Semester result deleted successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // 4. TEACHERS CRUD
@@ -1131,3 +1569,106 @@ apiRouter.post('/system/reset', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// 13. SUPABASE CLOUD DATABASE INTEGRATION ENDPOINTS
+apiRouter.get('/supabase/status', async (req, res) => {
+  try {
+    const creds = getSupabaseCredentials();
+    const isVercel = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+    const isRender = Boolean(process.env.RENDER || process.env.RENDER_SERVICE_ID);
+    
+    // Masked project URL
+    let maskedUrl = creds.url;
+    if (maskedUrl) {
+      try {
+        const u = new URL(maskedUrl);
+        maskedUrl = `${u.protocol}//${u.hostname}`;
+      } catch (_) {}
+    }
+
+    res.json({
+      success: true,
+      data: {
+        isConfigured: creds.isConfigured,
+        url: maskedUrl || null,
+        isServiceRole: creds.isServiceRole,
+        hasDatabaseUrl: Boolean(creds.dbUrl),
+        platform: isVercel ? 'Vercel' : isRender ? 'Render' : 'Standard Node / Docker',
+        message: creds.isConfigured
+          ? 'Supabase credentials detected in environment variables.'
+          : 'Supabase environment variables not detected. Local SQLite is active.',
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+apiRouter.post('/supabase/test', async (req, res) => {
+  try {
+    const result = await testSupabaseConnection();
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.get('/supabase/schema', (req, res) => {
+  try {
+    const schema = getSupabasePostgresSchema();
+    res.json({
+      success: true,
+      schema,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+apiRouter.post('/supabase/sync', async (req, res) => {
+  try {
+    const auth = getAuthUser(req);
+    if (auth.role && auth.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Only administrators can sync data to Supabase.' });
+    }
+
+    const result = await syncLocalDataToSupabase();
+    if (result.success) {
+      logAudit(
+        auth.userId,
+        auth.name || 'Admin',
+        'admin',
+        'Supabase Cloud Sync',
+        `Synchronized local records to Supabase (${Object.keys(result.syncedTables).length} tables)`
+      );
+    }
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/supabase/init-tables', async (req, res) => {
+  try {
+    const auth = getAuthUser(req);
+    if (auth.role && auth.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Only administrators can initialize database schema.' });
+    }
+
+    const result = await initPostgresTables();
+    if (result.success) {
+      logAudit(
+        auth.userId,
+        auth.name || 'Admin',
+        'admin',
+        'Supabase Schema Init',
+        'Initialized PostgreSQL tables on Supabase database'
+      );
+    }
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+

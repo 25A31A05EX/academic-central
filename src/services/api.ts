@@ -46,11 +46,11 @@ export const apiClient = {
   },
 
   // Auth
-  async login(identifier?: string, password?: string, role?: string, isDemoLogin?: boolean) {
+  async login(identifier?: string, password?: string, role?: string, isDemoLogin?: boolean, strictSupabaseAuth?: boolean) {
     const res = await fetch(`${API_BASE}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier, password, role, isDemoLogin }),
+      body: JSON.stringify({ identifier, password, role, isDemoLogin, strictSupabaseAuth }),
     });
     const data = await res.json();
     if (!res.ok || !data.success) {
@@ -59,7 +59,64 @@ export const apiClient = {
     if (data.token) {
       localStorage.setItem('academic_central_token', data.token);
     }
+    if (data.supabaseSession) {
+      localStorage.setItem('academic_central_supabase_session', JSON.stringify(data.supabaseSession));
+    }
     return data;
+  },
+
+  async supabaseLogin(identifier: string, password: string, role?: string) {
+    const res = await fetch(`${API_BASE}/auth/supabase-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier, password, role }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.message || `Supabase authentication failed (${res.status})`);
+    }
+    if (data.token) {
+      localStorage.setItem('academic_central_token', data.token);
+    }
+    if (data.supabaseSession) {
+      localStorage.setItem('academic_central_supabase_session', JSON.stringify(data.supabaseSession));
+    }
+    return data;
+  },
+
+  async supabaseRegister(payload: {
+    name: string;
+    email: string;
+    password?: string;
+    role: 'student' | 'teacher' | 'admin';
+    rollNumber?: string;
+    employeeId?: string;
+    branch?: string;
+    year?: string;
+    section?: string;
+    semester?: number;
+    department?: string;
+  }) {
+    const res = await fetch(`${API_BASE}/auth/supabase-register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.message || `Supabase registration failed (${res.status})`);
+    }
+    return data;
+  },
+
+  async getAuthConfig() {
+    try {
+      const res = await fetch(`${API_BASE}/auth/config`);
+      if (!res.ok) return { strictSupabaseAuth: true, supabaseConfigured: true };
+      return await res.json();
+    } catch (_) {
+      return { strictSupabaseAuth: true, supabaseConfigured: true };
+    }
   },
 
   async logout() {
@@ -120,12 +177,6 @@ export const apiClient = {
     const json = await res.json();
     if (!res.ok || !json.success) throw new Error(json.message || 'Failed to delete student');
     return json;
-  },
-
-  async getStudentSemesterResults(studentId: string): Promise<SemesterResult[]> {
-    const res = await fetch(`${API_BASE}/students/${studentId}/semester-results`);
-    const json = await res.json();
-    return json.data;
   },
 
   // Teachers
@@ -399,6 +450,54 @@ export const apiClient = {
     return json.data;
   },
 
+  // Semester Results (Academic History)
+  async getSemesterResults(studentId?: string): Promise<SemesterResult[]> {
+    const query = studentId ? `?studentId=${encodeURIComponent(studentId)}` : '';
+    const res = await fetch(`${API_BASE}/semester-results${query}`, { headers: getAuthHeaders() });
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.message || 'Failed to fetch semester results');
+    return json.data;
+  },
+
+  async getStudentSemesterResults(studentId: string): Promise<SemesterResult[]> {
+    const res = await fetch(`${API_BASE}/students/${encodeURIComponent(studentId)}/semester-results`, { headers: getAuthHeaders() });
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.message || 'Failed to fetch student semester results');
+    return json.data;
+  },
+
+  async addSemesterResult(result: Partial<SemesterResult>): Promise<any> {
+    const res = await fetch(`${API_BASE}/semester-results`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(result),
+    });
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.message || 'Failed to save semester result');
+    return json;
+  },
+
+  async updateSemesterResult(id: string, updates: Partial<SemesterResult>): Promise<any> {
+    const res = await fetch(`${API_BASE}/semester-results/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(updates),
+    });
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.message || 'Failed to update semester result');
+    return json;
+  },
+
+  async deleteSemesterResult(id: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/semester-results/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.message || 'Failed to delete semester result');
+    return json;
+  },
+
   // System Reset
   async resetSystem(): Promise<any> {
     const res = await fetch(`${API_BASE}/system/reset`, {
@@ -409,4 +508,71 @@ export const apiClient = {
     if (!res.ok || !json.success) throw new Error(json.message || 'Failed to reset system');
     return json;
   },
+
+  // Supabase Cloud Integration
+  async getSupabaseStatus(): Promise<{
+    success: boolean;
+    data: {
+      isConfigured: boolean;
+      url: string | null;
+      isServiceRole: boolean;
+      hasDatabaseUrl: boolean;
+      platform: string;
+      message: string;
+    };
+  }> {
+    const res = await fetch(`${API_BASE}/supabase/status`, {
+      headers: getAuthHeaders(),
+    });
+    return res.json();
+  },
+
+  async testSupabaseConnection(): Promise<{
+    success: boolean;
+    message: string;
+    latencyMs?: number;
+    tablesCount?: number;
+    details?: any;
+  }> {
+    const res = await fetch(`${API_BASE}/supabase/test`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    return res.json();
+  },
+
+  async getSupabaseSchema(): Promise<{
+    success: boolean;
+    schema: string;
+  }> {
+    const res = await fetch(`${API_BASE}/supabase/schema`, {
+      headers: getAuthHeaders(),
+    });
+    return res.json();
+  },
+
+  async initSupabaseTables(): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    const res = await fetch(`${API_BASE}/supabase/init-tables`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    return res.json();
+  },
+
+  async syncSupabaseData(): Promise<{
+    success: boolean;
+    syncedTables: Record<string, number>;
+    errors?: string[];
+    message: string;
+  }> {
+    const res = await fetch(`${API_BASE}/supabase/sync`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    return res.json();
+  },
 };
+
