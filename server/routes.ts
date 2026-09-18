@@ -712,7 +712,7 @@ apiRouter.get('/files/:category/:filename', (req, res) => {
 
 // Multipart (FormData) and Base64 File Upload Endpoint for Assignments, Lab Materials, and Submissions
 apiRouter.post('/files/upload', (req, res) => {
-  upload.single('file')(req, res, (uploadErr: any) => {
+  (upload.single('file') as any)(req, res, (uploadErr: any) => {
     if (uploadErr) {
       return res.status(400).json({
         success: false,

@@ -1,16 +1,13 @@
 import express from 'express';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { apiRouter } from './server/routes.js';
 import { getDb } from './server/db.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { seedInitialPdfFiles } from './server/seedFiles.js';
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Initialize SQLite database
   await getDb();
@@ -18,7 +15,6 @@ async function startServer() {
 
   // Seed sample initial PDF documents
   try {
-    const { seedInitialPdfFiles } = await import('./server/seedFiles.js');
     seedInitialPdfFiles();
     console.log('Sample PDF upload repository initialized successfully');
   } catch (err) {
@@ -44,7 +40,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.resolve(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
